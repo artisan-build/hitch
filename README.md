@@ -23,14 +23,23 @@ Claude Code · Cursor · Codex · Windsurf · Zed · VS Code · Gemini CLI · op
 
 Claude Desktop and JetBrains are recognized but deliberately not written to — see the spec for why.
 
+## Remote Install
+
+```sh
+hitch install https://example.com/mcp --token-stdin -c claude-code
+```
+
+You may pass the token as the optional second positional argument, but that can be visible to `ps`
+and saved in shell history. Prefer `--token-stdin` or `--token-env` for credentials.
+
 ## Build From Source
 
 ```sh
 go build ./...
 ```
 
-The current skeleton exposes `hitch version` and `hitch list`. Install, scan, uninstall, and packaged
-install one-liners are planned in later PRs.
+The current pre-release exposes `hitch version`, `hitch list`, and remote HTTP `hitch install`.
+Scan, uninstall, stdio servers, and packaged install one-liners are planned in later PRs.
 
 ## License
 

@@ -21,6 +21,15 @@ type DetectionResult struct {
 	PromptTier bool
 }
 
+func FileWriterClientByID(id string) (Client, bool) {
+	for _, client := range FileWriterClients() {
+		if client.ID == id {
+			return client, true
+		}
+	}
+	return Client{}, false
+}
+
 func FileWriterClients() []Client {
 	return []Client{
 		{ID: "claude-code", Name: "Claude Code", ConfigPath: claudeCodeConfigPath, MarkerPath: claudeCodeMarkerPath},
