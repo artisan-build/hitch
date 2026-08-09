@@ -143,15 +143,26 @@ and getting any one of these wrong silently produces a config the client ignores
 |---|---|---|---|
 | Claude Code | `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`) | `mcpServers` | `{type: "http", url, headers}` |
 | Cursor | `~/.cursor/mcp.json` | `mcpServers` | `{url, headers}` |
-| Codex | `~/.codex/config.toml` | `mcp_servers` | `{url, bearer_token_env_var}` — **TOML** |
+| Codex | `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | `mcp_servers` | `{url, bearer_token_env_var}` — **TOML** |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` | `{serverUrl, headers}` |
-| Zed | `~/.config/zed/settings.json` | `context_servers` | `{url, headers}` — **JSONC** |
+| Zed | platform-specific `zed/settings.json` | `context_servers` | `{url, headers}` — **JSONC** |
 | VS Code | platform-specific `Code/User/mcp.json` | `servers` | `{type: "http", url, headers}` |
 | Gemini CLI | `~/.gemini/settings.json` | `mcpServers` | `{httpUrl, headers}` |
 | opencode | `~/.config/opencode/opencode.json` | `mcp` | `{type: "remote", url, headers}` |
 
 VS Code path: macOS `~/Library/Application Support/Code/User/mcp.json`; Windows
 `%APPDATA%/Code/User/mcp.json`; Linux `~/.config/Code/User/mcp.json`.
+
+Codex path: defaults to `~/.codex/config.toml`, but `CODEX_HOME` overrides the state directory, so
+the config becomes `$CODEX_HOME/config.toml`. Source: `openai/codex`
+`codex-rs/core/src/config/mod.rs`; the published config docs omit this override.
+
+Zed path: macOS `~/.config/zed/settings.json` and deliberately ignores `XDG_CONFIG_HOME`; Windows
+`%APPDATA%/Zed/settings.json` with capital `Zed`; Linux/FreeBSD
+`${XDG_CONFIG_HOME:-~/.config}/zed/settings.json`. Source: `zed-industries/zed`
+`crates/paths/src/paths.rs config_dir()`. `FLATPAK_XDG_CONFIG_HOME` is deliberately unsupported in
+hitch because Zed uses it verbatim with no `zed` suffix, and a partial implementation would be
+misleading.
 
 ### Prompt-tier (recognized, deliberately not written)
 

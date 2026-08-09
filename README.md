@@ -3,12 +3,8 @@
 Install an MCP server into every coding agent on your machine with one command — and handle the
 credential correctly, including taking it back.
 
-```sh
-hitch install https://example.com/mcp $TOKEN
-```
-
 > **Status: pre-release.** The build is in progress; see [`docs/hitch-build.md`](docs/hitch-build.md)
-> for the spec. Nothing is installable yet.
+> for the spec. Install one-liners land in PR6.
 
 ## What it does
 
@@ -26,6 +22,15 @@ want this server in**, and writes the correct config for each.
 Claude Code · Cursor · Codex · Windsurf · Zed · VS Code · Gemini CLI · opencode
 
 Claude Desktop and JetBrains are recognized but deliberately not written to — see the spec for why.
+
+## Build From Source
+
+```sh
+go build ./...
+```
+
+The current skeleton exposes `hitch version` and `hitch list`. Install, scan, uninstall, and packaged
+install one-liners are planned in later PRs.
 
 ## License
 
