@@ -148,10 +148,14 @@ and getting any one of these wrong silently produces a config the client ignores
 | Zed | platform-specific `zed/settings.json` | `context_servers` | `{url, headers}` — **JSONC** |
 | VS Code | platform-specific `Code/User/mcp.json` | `servers` | `{type: "http", url, headers}` |
 | Gemini CLI | `~/.gemini/settings.json` | `mcpServers` | `{httpUrl, headers}` |
-| opencode | `~/.config/opencode/opencode.json` | `mcp` | `{type: "remote", url, headers}` |
+| opencode | `${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-~/.config}/opencode}/opencode.json` | `mcp` | `{type: "remote", url, headers}` |
 
 VS Code path: macOS `~/Library/Application Support/Code/User/mcp.json`; Windows
-`%APPDATA%/Code/User/mcp.json`; Linux `~/.config/Code/User/mcp.json`.
+`%APPDATA%/Code/User/mcp.json`; Linux `${XDG_CONFIG_HOME:-~/.config}/Code/User/mcp.json`.
+Before those platform defaults, VS Code honours `VSCODE_PORTABLE` as
+`$VSCODE_PORTABLE/user-data/User/mcp.json`, then `VSCODE_APPDATA` as
+`$VSCODE_APPDATA/Code/User/mcp.json`. Source: `microsoft/vscode`
+`src/vs/platform/environment/node/userDataPath.ts doGetUserDataPath()`.
 
 Codex path: defaults to `~/.codex/config.toml`, but `CODEX_HOME` overrides the state directory, so
 the config becomes `$CODEX_HOME/config.toml`. Source: `openai/codex`
@@ -163,6 +167,30 @@ Zed path: macOS `~/.config/zed/settings.json` and deliberately ignores `XDG_CONF
 `crates/paths/src/paths.rs config_dir()`. `FLATPAK_XDG_CONFIG_HOME` is deliberately unsupported in
 hitch because Zed uses it verbatim with no `zed` suffix, and a partial implementation would be
 misleading.
+
+opencode path: defaults through `xdg-basedir` as
+`${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json`, including on macOS, but
+`OPENCODE_CONFIG_DIR` takes precedence and points directly at the directory containing
+`opencode.json`. Source: `sst/opencode` `packages/core/src/global.ts`.
+
+Gemini CLI path: `~/.gemini/settings.json`; it does not honour XDG for this path, and no production
+config-dir override was found. `GEMINI_CONFIG_DIR` appears in its test harness, not in the resolver.
+Source: `google-gemini/gemini-cli` `packages/core/src/config/storage.ts getGlobalSettingsPath()`.
+
+Path evidence tiers:
+
+| Client | Tier | Citation | Limitation |
+|---|---|---|---|
+| Claude Code | SOURCE-VERIFIED | already verified in PR1; `CLAUDE_CONFIG_DIR` handled | Resolver source checked. |
+| Codex | SOURCE-VERIFIED | `openai/codex` `codex-rs/core/src/config/mod.rs` | Resolver source checked; docs omit `CODEX_HOME`. |
+| Zed | SOURCE-VERIFIED | `zed-industries/zed` `crates/paths/src/paths.rs` | Resolver source checked; docs do not state the macOS/XDG distinction. |
+| VS Code | SOURCE-VERIFIED | `microsoft/vscode` `src/vs/platform/environment/node/userDataPath.ts` | Resolver source checked, except `--user-data-dir` is CLI runtime state and not applicable to hitch. |
+| Gemini CLI | SOURCE-VERIFIED | `google-gemini/gemini-cli` `packages/core/src/config/storage.ts` | Resolver source checked; no production override found. |
+| opencode | SOURCE-VERIFIED | `sst/opencode` `packages/core/src/global.ts` | Resolver source checked. |
+| Cursor | VENDOR-DOCUMENTED | `cursor.com/docs/context/mcp` | Closed source: the documented path can change silently without a resolver we can check, so this is not at parity with SOURCE-VERIFIED. |
+| Windsurf | VENDOR-DOCUMENTED | `docs.devin.ai/desktop/cascade/mcp` | Closed source: the documented path can change silently without a resolver we can check, so this is not at parity with SOURCE-VERIFIED. |
+
+INHERITED-UNVERIFIED is empty for the PR2 remote HTTP adapter matrix.
 
 ### Prompt-tier (recognized, deliberately not written)
 
