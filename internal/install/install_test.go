@@ -44,8 +44,8 @@ func TestInstallFreshFileExactEntryShapesAndMode(t *testing.T) {
 			assertMode0600(t, path)
 			if tt.id == "codex" {
 				data := readTOML(t, path)
-				server := data["mcp_servers"].(map[string]any)["example"].(map[string]any)
-				if server["url"] != testURL || server["bearer_token_env_var"] != "HITCH_TOKEN_EXAMPLE" {
+				server := data["mcp_servers"].(map[string]any)["renamed"].(map[string]any)
+				if server["url"] != testURL || server["bearer_token_env_var"] != "HITCH_TOKEN_RENAMED" {
 					t.Fatalf("codex entry = %#v", server)
 				}
 				if strings.Contains(readFile(t, path), testToken) {
@@ -54,7 +54,7 @@ func TestInstallFreshFileExactEntryShapesAndMode(t *testing.T) {
 				return
 			}
 			data := readJSON(t, path)
-			got := data[tt.key].(map[string]any)["example"].(map[string]any)
+			got := data[tt.key].(map[string]any)["renamed"].(map[string]any)
 			assertJSONEqual(t, got, tt.expected)
 		})
 	}
@@ -90,7 +90,7 @@ func TestExistingConfigsPreserveUnrelatedFormatOtherServersAndAreIdempotent(t *t
 				t.Fatalf("second write was not byte-identical\nfirst:\n%s\nsecond:\n%s", first, second)
 			}
 			if tt.id == "codex" {
-				if !strings.Contains(second, "# keep me") || !strings.Contains(second, "[profile]") || !strings.Contains(second, "[mcp_servers.other]") {
+				if !strings.Contains(second, "[profile]") || !strings.Contains(second, "[mcp_servers.other]") {
 					t.Fatalf("codex unrelated TOML not preserved:\n%s", second)
 				}
 				return
@@ -98,9 +98,152 @@ func TestExistingConfigsPreserveUnrelatedFormatOtherServersAndAreIdempotent(t *t
 			if !strings.Contains(second, "\"zeta\": true") || !strings.Contains(second, "\"alpha\": false") || !strings.Contains(second, "\"other\"") {
 				t.Fatalf("json unrelated content not preserved:\n%s", second)
 			}
-			if strings.Contains(second, "\n  ,") || !strings.Contains(second, "},\n    \"example\"") || !strings.Contains(second, "\n  },\n  \"alpha\"") {
+			if strings.Contains(second, "\n  ,") || !strings.Contains(second, "},\n    \"renamed\"") || !strings.Contains(second, "\n  },\n  \"alpha\"") {
 				t.Fatalf("json insertion formatting is not hand-readable:\n%s", second)
 			}
+		})
+	}
+}
+
+func TestJSONInstallTargetsOnlyTopLevelConfigKey(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "claude-code")
+	var projects strings.Builder
+	for i := 0; i < 32; i++ {
+		if i > 0 {
+			projects.WriteString(",\n")
+		}
+		projects.WriteString("    \"/project-")
+		projects.WriteString(string(rune('a' + i%26)))
+		projects.WriteString("\": {\n      \"mcpServers\": {\n        \"nested\": {\"url\": \"https://nested/mcp\"}\n      }\n    }")
+	}
+	writeFile(t, path, "{\n  \"alpha\": true,\n  \"projects\": {\n"+projects.String()+"\n  },\n  \"omega\": true,\n  \"mcpServers\": {\n    \"existing\": {\"url\": \"https://top-level/mcp\"}\n  }\n}\n", 0o600)
+
+	_, err := InstallRemote(baseOptions(testEnv(home), "claude-code"))
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	data := readJSON(t, path)
+	topServers := data["mcpServers"].(map[string]any)
+	if topServers["renamed"] == nil {
+		t.Fatalf("top-level mcpServers was not updated: %#v", topServers)
+	}
+	projectMap := data["projects"].(map[string]any)
+	for name, rawProject := range projectMap {
+		servers := rawProject.(map[string]any)["mcpServers"].(map[string]any)
+		if servers["renamed"] != nil {
+			t.Fatalf("nested project %s was modified: %#v", name, servers)
+		}
+	}
+}
+
+func TestJSONUpdateTargetsOnlyTopLevelServerName(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	writeFile(t, path, "{\n  \"mcpServers\": {\n    \"other\": {\n      \"renamed\": {\"url\": \"https://nested-should-stay/mcp\"}\n    },\n    \"renamed\": {\"url\": \"https://old-top-level/mcp\"}\n  }\n}\n", 0o600)
+	_, err := InstallRemote(baseOptions(testEnv(home), "cursor"))
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	data := readJSON(t, path)
+	servers := data["mcpServers"].(map[string]any)
+	nested := servers["other"].(map[string]any)["renamed"].(map[string]any)
+	if nested["url"] != "https://nested-should-stay/mcp" {
+		t.Fatalf("nested server name was modified: %#v", nested)
+	}
+	top := servers["renamed"].(map[string]any)
+	if top["url"] != testURL {
+		t.Fatalf("top-level server not updated: %#v", top)
+	}
+}
+
+func TestCodexParsedRewritePreservesFollowingData(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     string
+		assert   func(t *testing.T, data map[string]any, raw string)
+		comments bool
+	}{
+		{
+			name: "array of tables after our table",
+			body: "[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n[[projects]]\npath = \"/x\"\ntrust_level = \"trusted\"\n",
+			assert: func(t *testing.T, data map[string]any, _ string) {
+				t.Helper()
+				projects := data["projects"].([]map[string]any)
+				if len(projects) != 1 || projects[0]["path"] != "/x" || projects[0]["trust_level"] != "trusted" {
+					t.Fatalf("projects array-of-tables not preserved: %#v", data["projects"])
+				}
+			},
+		},
+		{
+			name:     "comment then table after our table",
+			body:     "[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n# user comment\n[profile]\nname = \"default\"\n",
+			comments: true,
+			assert: func(t *testing.T, data map[string]any, raw string) {
+				t.Helper()
+				if data["profile"].(map[string]any)["name"] != "default" {
+					t.Fatalf("following table not preserved: %#v", data)
+				}
+				if strings.Contains(raw, "# user comment") {
+					t.Fatalf("BurntSushi/toml unexpectedly preserved comments; update the documented comment-loss decision")
+				}
+			},
+		},
+		{
+			name: "plain table after our table",
+			body: "[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n[profile]\nname = \"default\"\n",
+			assert: func(t *testing.T, data map[string]any, _ string) {
+				t.Helper()
+				if data["profile"].(map[string]any)["name"] != "default" {
+					t.Fatalf("plain table not preserved: %#v", data)
+				}
+			},
+		},
+		{
+			name: "our table at EOF",
+			body: "[profile]\nname = \"default\"\n\n[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n",
+			assert: func(t *testing.T, data map[string]any, _ string) {
+				t.Helper()
+				if data["profile"].(map[string]any)["name"] != "default" {
+					t.Fatalf("preceding table not preserved: %#v", data)
+				}
+			},
+		},
+		{
+			name: "our table first with sections after",
+			body: "[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n[profile]\nname = \"default\"\n\n[settings]\nsandbox = \"workspace-write\"\n",
+			assert: func(t *testing.T, data map[string]any, _ string) {
+				t.Helper()
+				if data["profile"].(map[string]any)["name"] != "default" || data["settings"].(map[string]any)["sandbox"] != "workspace-write" {
+					t.Fatalf("following sections not preserved: %#v", data)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			path := expectedPath(home, "codex")
+			writeFile(t, path, tt.body, 0o600)
+			_, err := InstallRemote(baseOptions(testEnv(home), "codex"))
+			if err != nil {
+				t.Fatalf("InstallRemote returned error: %v", err)
+			}
+			raw := readFile(t, path)
+			data := readTOML(t, path)
+			server := data["mcp_servers"].(map[string]any)["renamed"].(map[string]any)
+			if server["url"] != testURL || server["bearer_token_env_var"] != "HITCH_TOKEN_RENAMED" {
+				t.Fatalf("codex server not updated: %#v", server)
+			}
+			tt.assert(t, data, raw)
 		})
 	}
 }
@@ -132,6 +275,33 @@ func TestMalformedConfigsAreRefusedAndUnchanged(t *testing.T) {
 				t.Fatalf("malformed config changed to %q", got)
 			}
 		})
+	}
+}
+
+func TestZedMalformedJSONMentionsJSONCComments(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "zed")
+	writeFile(t, path, "{not valid json", 0o600)
+	_, err := InstallRemote(baseOptions(testEnv(home), "zed"))
+	if err == nil || !strings.Contains(err.Error(), "JSONC comments") {
+		t.Fatalf("Zed malformed error = %v, want JSONC comments hint", err)
+	}
+}
+
+func TestAtomicWriteImplementationUsesExclusiveTempAndRename(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile("install.go")
+	if err != nil {
+		t.Fatalf("read install.go: %v", err)
+	}
+	source := string(raw)
+	for _, want := range []string{"os.O_EXCL", "os.Rename", "0o600"} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("writeAtomic source missing %s", want)
+		}
 	}
 }
 
@@ -177,7 +347,7 @@ func TestSymlinkedConfigUpdatesTargetAndKeepsLink(t *testing.T) {
 		t.Fatalf("config symlink was replaced")
 	}
 	data := readJSON(t, target)
-	if data["mcpServers"].(map[string]any)["example"] == nil {
+	if data["mcpServers"].(map[string]any)["renamed"] == nil {
 		t.Fatalf("target was not updated")
 	}
 }
@@ -210,6 +380,21 @@ func TestNameInference(t *testing.T) {
 	}
 }
 
+func TestEmptySanitizedNameErrorsAndWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := baseOptions(testEnv(home), "cursor")
+	opts.Name = "!!!"
+	_, err := InstallRemote(opts)
+	if err == nil || !strings.Contains(err.Error(), "invalid after sanitizing") {
+		t.Fatalf("error = %v, want invalid sanitized name", err)
+	}
+	if _, statErr := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid name wrote config, stat err = %v", statErr)
+	}
+}
+
 func TestDryRunWritesNothingAndMasksToken(t *testing.T) {
 	t.Parallel()
 
@@ -223,11 +408,29 @@ func TestDryRunWritesNothingAndMasksToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallRemote returned error: %v", err)
 	}
-	if strings.Contains(out.String(), testToken) || !strings.Contains(out.String(), "Bearer ***") {
+	if strings.Contains(out.String(), testToken) || !strings.Contains(out.String(), "\"Authorization\": \"***\"") {
 		t.Fatalf("dry-run output leaked or failed to mask token: %q", out.String())
 	}
 	if _, err := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(err) {
 		t.Fatalf("dry-run wrote config, stat err = %v", err)
+	}
+}
+
+func TestDryRunMasksCustomHeaderValues(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	var out strings.Builder
+	opts := baseOptions(testEnv(home), "cursor")
+	opts.Headers["X-Api-Key"] = "SUPERSECRET_HEADER_VALUE"
+	opts.DryRun = true
+	opts.Stdout = &out
+	_, err := InstallRemote(opts)
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	if strings.Contains(out.String(), "SUPERSECRET_HEADER_VALUE") || !strings.Contains(out.String(), "\"X-Api-Key\": \"***\"") {
+		t.Fatalf("dry-run custom header leaked or was not masked: %q", out.String())
 	}
 }
 
@@ -258,10 +461,42 @@ func TestPreferencesContainOnlySelectionAndMode0600(t *testing.T) {
 	}
 }
 
+func TestPreferencesRejectRelativeXDGConfigHome(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t.TempDir())
+	env.XDGConfigHome = "relative-xdg"
+	_, err := LoadPreferences(env)
+	if err == nil || !strings.Contains(err.Error(), "XDG_CONFIG_HOME") {
+		t.Fatalf("LoadPreferences error = %v, want XDG_CONFIG_HOME", err)
+	}
+}
+
+func TestInteractiveInstallPropagatesRelativePreferencePathError(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t.TempDir())
+	env.XDGConfigHome = "relative-xdg"
+	_, err := InstallRemote(Options{
+		URL:     testURL,
+		Name:    "renamed",
+		Headers: map[string]string{"Authorization": "Bearer " + testToken},
+		Yes:     false,
+		NonTTY:  false,
+		Env:     env,
+		PickTargets: func(targets []Target, preferred map[string]bool) ([]Target, error) {
+			return targets, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "XDG_CONFIG_HOME") {
+		t.Fatalf("InstallRemote error = %v, want XDG_CONFIG_HOME", err)
+	}
+}
+
 func baseOptions(env harness.Env, clientIDs ...string) Options {
 	return Options{
 		URL:     testURL,
-		Name:    "example",
+		Name:    "renamed",
 		Headers: map[string]string{"Authorization": "Bearer " + testToken},
 		Clients: clientIDs,
 		Yes:     true,

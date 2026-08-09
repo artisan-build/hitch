@@ -125,11 +125,18 @@ func InferName(rawURL string) (string, bool, error) {
 
 func ResolveName(rawURL string, explicit string, yes bool, confirm func(string) (bool, error)) (string, error) {
 	if explicit != "" {
-		return sanitizeName(explicit), nil
+		name := sanitizeName(explicit)
+		if name == "" {
+			return "", fmt.Errorf("server name %q is invalid after sanitizing; provide a name with letters or numbers", explicit)
+		}
+		return name, nil
 	}
 	name, ambiguous, err := InferName(rawURL)
 	if err != nil {
 		return "", err
+	}
+	if name == "" {
+		return "", fmt.Errorf("could not infer a usable server name from %q", rawURL)
 	}
 	if !ambiguous {
 		return name, nil
@@ -239,7 +246,10 @@ func resolveTargets(opts Options) ([]Target, bool, error) {
 	if opts.NonTTY {
 		return nil, false, fmt.Errorf("non-TTY install requires either -y/--yes or -c/--client")
 	}
-	preferred, _ := LoadPreferences(opts.Env)
+	preferred, err := LoadPreferences(opts.Env)
+	if err != nil {
+		return nil, false, err
+	}
 	if opts.PickTargets == nil {
 		return nil, false, fmt.Errorf("interactive picker is unavailable")
 	}
@@ -324,7 +334,7 @@ func marshalJSON(v any) ([]byte, error) {
 }
 
 func setJSONObjectEntry(raw []byte, key string, name string, entry map[string]any) ([]byte, error) {
-	keyRange, found, err := findObjectValue(raw, key, 0, len(raw))
+	keyRange, found, err := findTopLevelObjectValue(raw, key)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +346,7 @@ func setJSONObjectEntry(raw []byte, key string, name string, entry map[string]an
 	if !found {
 		return insertTopLevelKey(raw, key, entryObject)
 	}
-	serverRange, serverFound, err := findObjectValue(raw, name, keyRange.start, keyRange.end)
+	serverRange, serverFound, err := findTopLevelObjectValueInRange(raw, name, keyRange)
 	if err != nil {
 		return nil, err
 	}
@@ -353,33 +363,82 @@ func setJSONObjectEntry(raw []byte, key string, name string, entry map[string]an
 
 type byteRange struct{ start, end int }
 
-func findObjectValue(raw []byte, key string, start int, end int) (byteRange, bool, error) {
-	needle, _ := json.Marshal(key)
-	for i := start; i < end-len(needle); i++ {
-		if !bytes.Equal(raw[i:i+len(needle)], needle) {
-			continue
-		}
-		j := i + len(needle)
-		for j < end && isSpace(raw[j]) {
-			j++
-		}
-		if j >= end || raw[j] != ':' {
-			continue
-		}
-		j++
-		for j < end && isSpace(raw[j]) {
-			j++
-		}
-		if j >= end || raw[j] != '{' {
-			return byteRange{}, false, fmt.Errorf("value for %q is not an object", key)
-		}
-		close, err := matchingBrace(raw, j)
+func findTopLevelObjectValue(raw []byte, key string) (byteRange, bool, error) {
+	return findTopLevelObjectValueInRange(raw, key, byteRange{start: 0, end: len(raw)})
+}
+
+func findTopLevelObjectValueInRange(raw []byte, key string, bounds byteRange) (byteRange, bool, error) {
+	if bounds.start < 0 || bounds.end > len(raw) || bounds.start >= bounds.end {
+		return byteRange{}, false, errors.New("invalid JSON object range")
+	}
+	base := bounds.start
+	section := raw[bounds.start:bounds.end]
+	span, found, err := findTopLevelObjectValueInSection(section, key)
+	if err != nil || !found {
+		return byteRange{}, found, err
+	}
+	return byteRange{start: base + span.start, end: base + span.end}, true, nil
+}
+
+func findTopLevelObjectValueInSection(raw []byte, key string) (byteRange, bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return byteRange{}, false, err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return byteRange{}, false, errors.New("existing config is not a JSON object")
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
 		if err != nil {
 			return byteRange{}, false, err
 		}
-		return byteRange{start: j, end: close + 1}, true, nil
+		keyString, ok := keyTok.(string)
+		if !ok {
+			return byteRange{}, false, errors.New("top-level JSON object key is not a string")
+		}
+		keyEnd := int(dec.InputOffset())
+		valueStart, err := jsonValueStart(raw, keyEnd)
+		if err != nil {
+			return byteRange{}, false, err
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return byteRange{}, false, err
+		}
+		valueEnd := int(dec.InputOffset())
+		if keyString != key {
+			continue
+		}
+		if len(value) == 0 || value[0] != '{' {
+			return byteRange{}, false, fmt.Errorf("value for %q is not an object", key)
+		}
+		return byteRange{start: valueStart, end: valueEnd}, true, nil
+	}
+	if _, err := dec.Token(); err != nil {
+		return byteRange{}, false, err
 	}
 	return byteRange{}, false, nil
+}
+
+func jsonValueStart(raw []byte, keyEnd int) (int, error) {
+	i := keyEnd
+	for i < len(raw) && isSpace(raw[i]) {
+		i++
+	}
+	if i >= len(raw) || raw[i] != ':' {
+		return 0, errors.New("expected ':' after JSON object key")
+	}
+	i++
+	for i < len(raw) && isSpace(raw[i]) {
+		i++
+	}
+	if i >= len(raw) {
+		return 0, errors.New("expected JSON value after object key")
+	}
+	return i, nil
 }
 
 func matchingBrace(raw []byte, open int) (int, error) {
@@ -519,45 +578,29 @@ func writeTOMLEntry(path string, key string, name string, entry map[string]any) 
 	if err != nil {
 		return err
 	}
+	doc := map[string]any{}
 	if existed && len(bytes.TrimSpace(raw)) > 0 {
-		decoded := map[string]any{}
-		if _, err := toml.Decode(string(raw), &decoded); err != nil {
+		if _, err := toml.Decode(string(raw), &doc); err != nil {
 			return fmt.Errorf("existing config %s is not valid TOML (%v); fix or remove it, then retry", path, err)
 		}
 		if regexp.MustCompile(`(?m)^\s*mcp_servers\s*=`).Find(raw) != nil {
 			return fmt.Errorf("existing config %s uses an inline table for mcp_servers; convert it to a [mcp_servers] table, then retry", path)
 		}
 	}
-	block := codexBlock(key, name, entry)
-	updated := replaceTOMLTable(raw, key+"."+name, block)
+	servers, ok := doc[key].(map[string]any)
+	if !ok {
+		servers = map[string]any{}
+		doc[key] = servers
+	}
+	servers[name] = map[string]any{
+		"url":                  entry["url"],
+		"bearer_token_env_var": entry["bearer_token_env_var"],
+	}
+	updated, err := toml.Marshal(doc)
+	if err != nil {
+		return err
+	}
 	return writeAtomic(path, updated)
-}
-
-func codexBlock(key string, name string, entry map[string]any) []byte {
-	return []byte(fmt.Sprintf("[%s.%s]\nurl = %q\nbearer_token_env_var = %q\n", key, name, entry["url"], entry["bearer_token_env_var"]))
-}
-
-func replaceTOMLTable(raw []byte, table string, block []byte) []byte {
-	pattern := regexp.MustCompile(`(?m)^\[` + regexp.QuoteMeta(table) + `\]\s*$`)
-	loc := pattern.FindIndex(raw)
-	if loc == nil {
-		trimmed := bytes.TrimRight(raw, "\n")
-		if len(trimmed) == 0 {
-			return block
-		}
-		out := append([]byte{}, trimmed...)
-		out = append(out, []byte("\n\n")...)
-		out = append(out, block...)
-		return out
-	}
-	start := loc[0]
-	nextPattern := regexp.MustCompile(`(?m)^\[[^\]]+\]\s*$`)
-	next := nextPattern.FindAllIndex(raw[loc[1]:], -1)
-	end := len(raw)
-	if len(next) > 0 {
-		end = loc[1] + next[0][0]
-	}
-	return replaceRange(raw, start, end, block)
 }
 
 func readExisting(path string) ([]byte, bool, error) {
@@ -617,21 +660,32 @@ func maskValue(v any) any {
 	case map[string]any:
 		out := map[string]any{}
 		for k, val := range typed {
-			if strings.EqualFold(k, "authorization") {
-				out[k] = "Bearer ***"
+			if strings.EqualFold(k, "headers") {
+				out[k] = maskHeaderMap(val)
 			} else {
 				out[k] = maskValue(val)
 			}
 		}
 		return out
 	case map[string]string:
+		return maskHeaderMap(typed)
+	default:
+		return v
+	}
+}
+
+func maskHeaderMap(v any) any {
+	switch typed := v.(type) {
+	case map[string]string:
 		out := map[string]any{}
-		for k, val := range typed {
-			if strings.EqualFold(k, "authorization") {
-				out[k] = "Bearer ***"
-			} else {
-				out[k] = val
-			}
+		for k := range typed {
+			out[k] = "***"
+		}
+		return out
+	case map[string]any:
+		out := map[string]any{}
+		for k := range typed {
+			out[k] = "***"
 		}
 		return out
 	default:
@@ -640,7 +694,11 @@ func maskValue(v any) any {
 }
 
 func LoadPreferences(env harness.Env) (map[string]bool, error) {
-	raw, err := os.ReadFile(preferencesPath(env))
+	path, err := preferencesPath(env)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -669,21 +727,35 @@ func SavePreferences(env harness.Env, clients []string) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(preferencesPath(env), content)
+	path, err := preferencesPath(env)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(path, content)
 }
 
 func ForgetPreferences(env harness.Env) error {
-	err := os.Remove(preferencesPath(env))
+	path, pathErr := preferencesPath(env)
+	if pathErr != nil {
+		return pathErr
+	}
+	err := os.Remove(path)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	return err
 }
 
-func preferencesPath(env harness.Env) string {
+func preferencesPath(env harness.Env) (string, error) {
 	base := env.XDGConfigHome
+	source := "XDG_CONFIG_HOME"
 	if base == "" {
 		base = filepath.Join(env.Home, ".config")
+		source = "HOME or USERPROFILE"
 	}
-	return filepath.Join(base, "hitch", "preferences.json")
+	path := filepath.Join(base, "hitch", "preferences.json")
+	if path == "" || !filepath.IsAbs(path) {
+		return "", fmt.Errorf("config path must be absolute; check %s", source)
+	}
+	return path, nil
 }
