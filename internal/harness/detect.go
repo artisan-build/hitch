@@ -3,8 +3,12 @@ package harness
 import "os"
 
 func Detect(env Env) ([]DetectionResult, error) {
-	results := make([]DetectionResult, 0, len(AllClients()))
-	for _, client := range FileWriterClients() {
+	return detect(env, FileWriterClients(), PromptTierClients())
+}
+
+func detect(env Env, fileWriterClients []Client, promptTierClients []Client) ([]DetectionResult, error) {
+	results := make([]DetectionResult, 0, len(fileWriterClients)+len(promptTierClients))
+	for _, client := range fileWriterClients {
 		configPath, err := client.ConfigPath(env)
 		if err != nil {
 			return nil, err
@@ -21,7 +25,7 @@ func Detect(env Env) ([]DetectionResult, error) {
 		})
 	}
 
-	for _, client := range PromptTierClients() {
+	for _, client := range promptTierClients {
 		detected, err := isDetected(client, env)
 		if err != nil {
 			return nil, err
@@ -30,7 +34,7 @@ func Detect(env Env) ([]DetectionResult, error) {
 			ID:         client.ID,
 			Name:       client.Name,
 			Detected:   detected,
-			PromptTier: true,
+			PromptTier: client.PromptTier,
 		})
 	}
 

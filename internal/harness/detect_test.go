@@ -105,6 +105,70 @@ func TestDetectAllClients(t *testing.T) {
 	}
 }
 
+func TestCodexHomeDetection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		setup    func(t *testing.T, home string) Env
+		detected bool
+		path     func(home string) string
+	}{
+		{
+			name: "unset CODEX_HOME uses default",
+			setup: func(t *testing.T, home string) Env {
+				t.Helper()
+				mkdir(t, filepath.Join(home, ".codex"))
+				return testEnv(home)
+			},
+			detected: true,
+			path: func(home string) string {
+				return filepath.Join(home, ".codex", "config.toml")
+			},
+		},
+		{
+			name: "CODEX_HOME set and exists",
+			setup: func(t *testing.T, home string) Env {
+				t.Helper()
+				env := testEnv(home)
+				env.CodexHome = filepath.Join(home, "codex-home")
+				mkdir(t, env.CodexHome)
+				return env
+			},
+			detected: true,
+			path: func(home string) string {
+				return filepath.Join(home, "codex-home", "config.toml")
+			},
+		},
+		{
+			name: "CODEX_HOME set and missing",
+			setup: func(_ *testing.T, home string) Env {
+				env := testEnv(home)
+				env.CodexHome = filepath.Join(home, "missing-codex-home")
+				return env
+			},
+			path: func(home string) string {
+				return filepath.Join(home, "missing-codex-home", "config.toml")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			env := tt.setup(t, home)
+			result := detectByID(t, env, "codex")
+			if result.Detected != tt.detected {
+				t.Fatalf("Codex detected = %v, want %v", result.Detected, tt.detected)
+			}
+			if result.ConfigPath != tt.path(home) {
+				t.Fatalf("Codex config path = %q, want %q", result.ConfigPath, tt.path(home))
+			}
+		})
+	}
+}
+
 func TestDetectEmptyHome(t *testing.T) {
 	t.Parallel()
 
@@ -193,13 +257,14 @@ func TestConfigPathPerGOOS(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		goos   string
-		wantVS string
+		name    string
+		goos    string
+		wantVS  string
+		wantZed string
 	}{
-		{name: "darwin", goos: "darwin", wantVS: filepath.Join("/home/test", "Library", "Application Support", "Code", "User", "mcp.json")},
-		{name: "windows", goos: "windows", wantVS: filepath.Join("/appdata", "Code", "User", "mcp.json")},
-		{name: "linux", goos: "linux", wantVS: filepath.Join("/xdg", "Code", "User", "mcp.json")},
+		{name: "darwin", goos: "darwin", wantVS: filepath.Join("/home/test", "Library", "Application Support", "Code", "User", "mcp.json"), wantZed: filepath.Join("/home/test", ".config", "zed", "settings.json")},
+		{name: "windows", goos: "windows", wantVS: filepath.Join("/appdata", "Code", "User", "mcp.json"), wantZed: filepath.Join("/appdata", "Zed", "settings.json")},
+		{name: "linux", goos: "linux", wantVS: filepath.Join("/xdg", "Code", "User", "mcp.json"), wantZed: filepath.Join("/xdg", "zed", "settings.json")},
 	}
 
 	for _, tt := range tests {
@@ -219,7 +284,35 @@ func TestConfigPathPerGOOS(t *testing.T) {
 			if !strings.HasSuffix(filepath.ToSlash(got), "Code/User/mcp.json") {
 				t.Fatalf("VS Code path %q does not end with Code/User/mcp.json", got)
 			}
+
+			gotZed, ok, err := ConfigPath("zed", env)
+			if err != nil {
+				t.Fatalf("Zed ConfigPath returned error: %v", err)
+			}
+			if !ok {
+				t.Fatalf("Zed client path not found")
+			}
+			if gotZed != tt.wantZed {
+				t.Fatalf("Zed path = %q, want %q", gotZed, tt.wantZed)
+			}
 		})
+	}
+}
+
+func TestZedDarwinIgnoresXDGConfigHome(t *testing.T) {
+	t.Parallel()
+
+	env := Env{Home: "/home/test", XDGConfigHome: "/elsewhere", AppData: "/appdata", GOOS: "darwin"}
+	got, ok, err := ConfigPath("zed", env)
+	if err != nil {
+		t.Fatalf("ConfigPath returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("Zed client path not found")
+	}
+	want := filepath.Join("/home/test", ".config", "zed", "settings.json")
+	if got != want {
+		t.Fatalf("Zed darwin path = %q, want %q", got, want)
 	}
 }
 
@@ -232,6 +325,35 @@ func TestConfigPathRejectsEmptyHome(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HOME") || !strings.Contains(err.Error(), "USERPROFILE") {
 		t.Fatalf("ConfigPath error = %q, want HOME and USERPROFILE", err.Error())
+	}
+}
+
+func TestConfigPathRejectsNonAbsoluteOverrideVariables(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		env  Env
+		id   string
+		want string
+	}{
+		{name: "XDG_CONFIG_HOME", env: Env{Home: "/home/test", XDGConfigHome: "relative-xdg", GOOS: "linux"}, id: "opencode", want: "XDG_CONFIG_HOME"},
+		{name: "APPDATA", env: Env{Home: "/home/test", AppData: "relative-appdata", GOOS: "windows"}, id: "vscode", want: "APPDATA"},
+		{name: "CLAUDE_CONFIG_DIR", env: Env{Home: "/home/test", ClaudeConfigDir: "relative-claude", GOOS: "darwin"}, id: "claude-code", want: "CLAUDE_CONFIG_DIR"},
+		{name: "CODEX_HOME", env: Env{Home: "/home/test", CodexHome: "relative-codex", GOOS: "darwin"}, id: "codex", want: "CODEX_HOME"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := ConfigPath(tt.id, tt.env)
+			if err == nil {
+				t.Fatalf("ConfigPath returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ConfigPath error = %q, want %q", err.Error(), tt.want)
+			}
+		})
 	}
 }
 
@@ -263,6 +385,18 @@ func TestAllResolvedPathsAreAbsolute(t *testing.T) {
 	}
 }
 
+func TestMarkerPathErrorsWithoutConfigOrMarker(t *testing.T) {
+	t.Parallel()
+
+	_, err := markerPath(Client{ID: "broken"}, testEnv(t.TempDir()))
+	if err == nil {
+		t.Fatalf("markerPath returned nil error")
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("markerPath error = %q, want client ID", err.Error())
+	}
+}
+
 func TestPromptTierDetectionAndLabelData(t *testing.T) {
 	t.Parallel()
 
@@ -282,6 +416,76 @@ func TestPromptTierDetectionAndLabelData(t *testing.T) {
 		if result.ConfigPath != "" {
 			t.Fatalf("%s ConfigPath = %q, want empty", id, result.ConfigPath)
 		}
+	}
+}
+
+func TestPromptTierFieldIsUsed(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	env := testEnv(home)
+	mkdir(t, filepath.Join(home, "Library", "Application Support", "Claude"))
+	clients := PromptTierClients()
+	clients[0].PromptTier = false
+	results, err := detect(env, nil, clients[:1])
+	if err != nil {
+		t.Fatalf("detect returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("result count = %d, want 1", len(results))
+	}
+	if results[0].PromptTier {
+		t.Fatalf("PromptTier = true, want false after flipped client field")
+	}
+}
+
+func TestPromptTierMarkerPathPerGOOS(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		env               Env
+		wantClaudeDesktop string
+		wantJetBrains     string
+	}{
+		{
+			name:              "darwin",
+			env:               Env{Home: "/home/test", XDGConfigHome: "/xdg", AppData: "/appdata", GOOS: "darwin"},
+			wantClaudeDesktop: filepath.Join("/home/test", "Library", "Application Support", "Claude"),
+			wantJetBrains:     filepath.Join("/home/test", "Library", "Application Support", "JetBrains"),
+		},
+		{
+			name:              "windows",
+			env:               Env{Home: "/home/test", XDGConfigHome: "/xdg", AppData: "/appdata", GOOS: "windows"},
+			wantClaudeDesktop: filepath.Join("/appdata", "Claude"),
+			wantJetBrains:     filepath.Join("/appdata", "JetBrains"),
+		},
+		{
+			name:              "linux",
+			env:               Env{Home: "/home/test", XDGConfigHome: "/xdg", AppData: "/appdata", GOOS: "linux"},
+			wantClaudeDesktop: filepath.Join("/xdg", "Claude"),
+			wantJetBrains:     filepath.Join("/xdg", "JetBrains"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			claudeDesktop, err := claudeDesktopMarkerPath(tt.env)
+			if err != nil {
+				t.Fatalf("claudeDesktopMarkerPath returned error: %v", err)
+			}
+			if claudeDesktop != tt.wantClaudeDesktop {
+				t.Fatalf("Claude Desktop marker = %q, want %q", claudeDesktop, tt.wantClaudeDesktop)
+			}
+			jetBrains, err := jetBrainsMarkerPath(tt.env)
+			if err != nil {
+				t.Fatalf("jetBrainsMarkerPath returned error: %v", err)
+			}
+			if jetBrains != tt.wantJetBrains {
+				t.Fatalf("JetBrains marker = %q, want %q", jetBrains, tt.wantJetBrains)
+			}
+		})
 	}
 }
 
@@ -322,7 +526,7 @@ func expectedFileWriterClients() []expectedClient {
 		{id: "cursor", shapeSuffix: ".cursor/mcp.json", configPath: literalPath(".cursor", "mcp.json"), markerPath: literalPath(".cursor")},
 		{id: "codex", shapeSuffix: ".codex/config.toml", configPath: literalPath(".codex", "config.toml"), markerPath: literalPath(".codex")},
 		{id: "windsurf", shapeSuffix: ".codeium/windsurf/mcp_config.json", configPath: literalPath(".codeium", "windsurf", "mcp_config.json"), markerPath: literalPath(".codeium", "windsurf")},
-		{id: "zed", shapeSuffix: ".config/zed/settings.json", configPath: xdgLiteralPath("zed", "settings.json"), markerPath: xdgLiteralPath("zed")},
+		{id: "zed", shapeSuffix: ".config/zed/settings.json", configPath: literalPath(".config", "zed", "settings.json"), markerPath: literalPath(".config", "zed")},
 		{id: "vscode", shapeSuffix: "Code/User/mcp.json", configPath: literalPath("Library", "Application Support", "Code", "User", "mcp.json"), markerPath: literalPath("Library", "Application Support", "Code", "User")},
 		{id: "gemini-cli", shapeSuffix: ".gemini/settings.json", configPath: literalPath(".gemini", "settings.json"), markerPath: literalPath(".gemini")},
 		{id: "opencode", shapeSuffix: ".config/opencode/opencode.json", configPath: xdgLiteralPath("opencode", "opencode.json"), markerPath: xdgLiteralPath("opencode")},

@@ -12,11 +12,16 @@ type Env struct {
 	XDGConfigHome   string
 	AppData         string
 	ClaudeConfigDir string
+	CodexHome       string
 	GOOS            string
 }
 
 func CurrentEnv() (Env, error) {
-	home, err := os.UserHomeDir()
+	return currentEnv(os.UserHomeDir, os.Getenv, runtime.GOOS)
+}
+
+func currentEnv(homeFn func() (string, error), getenv func(string) string, goos string) (Env, error) {
+	home, err := homeFn()
 	if err != nil || home == "" {
 		return Env{}, fmt.Errorf("could not resolve user home from HOME or USERPROFILE")
 	}
@@ -25,10 +30,11 @@ func CurrentEnv() (Env, error) {
 	}
 	return Env{
 		Home:            home,
-		XDGConfigHome:   os.Getenv("XDG_CONFIG_HOME"),
-		AppData:         os.Getenv("APPDATA"),
-		ClaudeConfigDir: os.Getenv("CLAUDE_CONFIG_DIR"),
-		GOOS:            runtime.GOOS,
+		XDGConfigHome:   getenv("XDG_CONFIG_HOME"),
+		AppData:         getenv("APPDATA"),
+		ClaudeConfigDir: getenv("CLAUDE_CONFIG_DIR"),
+		CodexHome:       getenv("CODEX_HOME"),
+		GOOS:            goos,
 	}, nil
 }
 
@@ -37,4 +43,11 @@ func (env Env) xdgConfigHome() string {
 		return env.XDGConfigHome
 	}
 	return join(env.Home, ".config")
+}
+
+func (env Env) xdgConfigVar() string {
+	if env.XDGConfigHome != "" {
+		return "XDG_CONFIG_HOME"
+	}
+	return "HOME or USERPROFILE"
 }

@@ -69,7 +69,7 @@ func runList(out io.Writer, env harness.Env) error {
 			status = "detected"
 		}
 		if result.PromptTier {
-			status += " (prompt-tier - use 'hitch prompt')"
+			status += " (prompt-tier - hitch does not write this client's config)"
 		}
 
 		path := result.ConfigPath
@@ -85,6 +85,9 @@ func runList(out io.Writer, env harness.Env) error {
 }
 
 func Main(args []string, stdout io.Writer, stderr io.Writer, envFn func() (harness.Env, error)) int {
+	if len(args) == 1 && args[0] == "help" {
+		args = []string{"--help"}
+	}
 	root := NewRootCommand(envFn)
 	root.SetArgs(args)
 	root.SetOut(stdout)
@@ -96,7 +99,7 @@ func Main(args []string, stdout io.Writer, stderr io.Writer, envFn func() (harne
 	return 0
 }
 
-func ExecuteForTest(root *cobra.Command, args ...string) error {
+func executeForTest(root *cobra.Command, args ...string) error {
 	root.SetArgs(args)
 	root.SetIn(os.Stdin)
 	return root.Execute()
