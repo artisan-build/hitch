@@ -19,8 +19,12 @@ token-store, affordances, or API-base logic.
 - merge method: `gh pr merge --squash --auto` (fall back to watch-CI-then-direct-merge if auto is off)
 
 ## Hard gate (coordinator verifies on the committed SHA, clean tree)
-- command: `gofmt -l . | (! grep .) && go vet ./... && golangci-lint run && go test ./...`
-- Until PR1 lands the golangci-lint config, the gate is the gofmt check + `go vet ./...` + `go test ./...`.
+- command: `gofmt -l . | (! grep .) && go vet ./... && golangci-lint run && go test -count=1 ./...`
+- **`-count=1` is mandatory, not optional.** Without it Go serves cached results, and a `(cached)`
+  line is a pass nobody observed being produced — the same shape as a mutation that never applied or
+  a check that exited before running. **A verification step that did not execute must never be able
+  to render as a pass.** This applies to every harness in this project, the coordinator's own
+  included.
 - monorepo: no.
 
 ## CI (the merge gate for Mode A)
