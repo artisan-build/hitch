@@ -45,8 +45,10 @@ func TestHelpListsOnlyPR1Commands(t *testing.T) {
 			t.Fatalf("help output %q does not contain %q", got, want)
 		}
 	}
-	if strings.Contains(got, "completion") {
-		t.Fatalf("help output includes Cobra completion command: %q", got)
+	for _, hidden := range []string{"completion", "help        Help"} {
+		if strings.Contains(got, hidden) {
+			t.Fatalf("help output includes hidden command %q: %q", hidden, got)
+		}
 	}
 }
 
