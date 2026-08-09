@@ -98,6 +98,9 @@ func TestExistingConfigsPreserveUnrelatedFormatOtherServersAndAreIdempotent(t *t
 			if !strings.Contains(second, "\"zeta\": true") || !strings.Contains(second, "\"alpha\": false") || !strings.Contains(second, "\"other\"") {
 				t.Fatalf("json unrelated content not preserved:\n%s", second)
 			}
+			if strings.Contains(second, "\n  ,") || !strings.Contains(second, "},\n    \"example\"") || !strings.Contains(second, "\n  },\n  \"alpha\"") {
+				t.Fatalf("json insertion formatting is not hand-readable:\n%s", second)
+			}
 		})
 	}
 }

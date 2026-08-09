@@ -37,10 +37,13 @@ func TestCurrentEnvHomeResolution(t *testing.T) {
 				return tt.home, tt.homeErr
 			}, func(key string) string {
 				values := map[string]string{
-					"XDG_CONFIG_HOME":   "/xdg",
-					"APPDATA":           "/appdata",
-					"CLAUDE_CONFIG_DIR": "/claude-config",
-					"CODEX_HOME":        "/codex-home",
+					"XDG_CONFIG_HOME":     "/xdg",
+					"APPDATA":             "/appdata",
+					"CLAUDE_CONFIG_DIR":   "/claude-config",
+					"CODEX_HOME":          "/codex-home",
+					"OPENCODE_CONFIG_DIR": "/opencode-config",
+					"VSCODE_PORTABLE":     "/vscode-portable",
+					"VSCODE_APPDATA":      "/vscode-appdata",
 				}
 				return values[key]
 			}, "linux")
@@ -57,7 +60,7 @@ func TestCurrentEnvHomeResolution(t *testing.T) {
 			if err != nil {
 				t.Fatalf("currentEnv returned error: %v", err)
 			}
-			if env.Home != "/home/test" || env.XDGConfigHome != "/xdg" || env.AppData != "/appdata" || env.ClaudeConfigDir != "/claude-config" || env.CodexHome != "/codex-home" || env.GOOS != "linux" {
+			if env.Home != "/home/test" || env.XDGConfigHome != "/xdg" || env.AppData != "/appdata" || env.ClaudeConfigDir != "/claude-config" || env.CodexHome != "/codex-home" || env.OpencodeConfigDir != "/opencode-config" || env.VSCodePortable != "/vscode-portable" || env.VSCodeAppData != "/vscode-appdata" || env.GOOS != "linux" {
 				t.Fatalf("currentEnv = %#v", env)
 			}
 		})

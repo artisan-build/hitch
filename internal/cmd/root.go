@@ -45,6 +45,13 @@ type exitError struct {
 
 func (e exitError) Error() string { return e.err.Error() }
 
+type silentExitError struct {
+	err  error
+	code int
+}
+
+func (e silentExitError) Error() string { return e.err.Error() }
+
 func newVersionCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
@@ -120,7 +127,10 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				return summaryErr
 			}
 			if err != nil {
-				return err
+				if len(result.Failures) == 0 {
+					return err
+				}
+				return silentExitError{err: err, code: 1}
 			}
 			return nil
 		},
@@ -240,7 +250,7 @@ func printInstallSummary(out io.Writer, result install.Result, dryRun bool) erro
 			return err
 		}
 	}
-	if result.CodexEnvVar != "" {
+	if result.CodexWritten {
 		if _, err := fmt.Fprintf(out, "Codex uses an environment variable; export %s before starting Codex.\n", result.CodexEnvVar); err != nil {
 			return err
 		}
@@ -311,6 +321,10 @@ func Main(args []string, stdout io.Writer, stderr io.Writer, envFn func() (harne
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	if err := root.Execute(); err != nil {
+		var silent silentExitError
+		if errors.As(err, &silent) {
+			return silent.code
+		}
 		_, _ = fmt.Fprintln(stderr, err)
 		var ee exitError
 		if errors.As(err, &ee) {

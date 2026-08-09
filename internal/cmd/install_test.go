@@ -49,3 +49,38 @@ func TestInstallCLIHidesTokenOnSuccessAndDryRun(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallDoesNotPrintCodexEnvLineWhenCodexNotTargeted(t *testing.T) {
+	home := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok_SENTINEL_cursor", "--client", "cursor"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Codex uses an environment variable") {
+		t.Fatalf("stdout printed false Codex note: %q", stdout.String())
+	}
+}
+
+func TestInstallDoesNotPrintCodexEnvLineWhenCodexWriteFails(t *testing.T) {
+	home := t.TempDir()
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	writeFile(t, codexConfig, "[broken\n", 0o600)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok_SENTINEL_codex", "--client", "codex"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero")
+	}
+	if strings.Contains(stdout.String(), "Codex uses an environment variable") {
+		t.Fatalf("stdout printed false Codex note: %q", stdout.String())
+	}
+	if strings.Count(stdout.String()+stderr.String(), string(os.PathSeparator)+"config.toml") != 1 {
+		t.Fatalf("failure detail should be printed once, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}

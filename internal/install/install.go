@@ -50,11 +50,12 @@ type Options struct {
 }
 
 type Result struct {
-	Name        string
-	Written     []string
-	WouldWrite  []string
-	Failures    []string
-	CodexEnvVar string
+	Name         string
+	Written      []string
+	WouldWrite   []string
+	Failures     []string
+	CodexEnvVar  string
+	CodexWritten bool
 }
 
 func Adapters() []Adapter {
@@ -186,6 +187,9 @@ func InstallRemote(opts Options) (Result, error) {
 			continue
 		}
 		res.Written = append(res.Written, target.Path)
+		if adapter.ClientID == "codex" {
+			res.CodexWritten = true
+		}
 	}
 	if interactive && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
@@ -431,18 +435,51 @@ func insertIntoObject(raw []byte, start int, end int, key string, value []byte) 
 	inner := bytes.TrimSpace(raw[start+1 : end-1])
 	var insertion []byte
 	keyBytes, _ := json.Marshal(key)
-	formattedValue := indentMultiline(value, "  ")
+	memberIndent := objectMemberIndent(raw, start, end)
+	formattedValue := indentMultiline(value, memberIndent)
 	if len(inner) == 0 {
-		insertion = append([]byte("\n  "), keyBytes...)
+		insertion = append([]byte("\n"+memberIndent), keyBytes...)
 		insertion = append(insertion, []byte(": ")...)
 		insertion = append(insertion, formattedValue...)
-		insertion = append(insertion, []byte("\n")...)
+		insertion = append(insertion, []byte("\n"+parentIndent(raw, start))...)
 		return replaceRange(raw, start+1, end-1, insertion), nil
 	}
-	insertion = append([]byte(",\n  "), keyBytes...)
+	insertAt := end - 1
+	for insertAt > start && isSpace(raw[insertAt-1]) {
+		insertAt--
+	}
+	insertion = append([]byte(",\n"+memberIndent), keyBytes...)
 	insertion = append(insertion, []byte(": ")...)
 	insertion = append(insertion, formattedValue...)
-	return replaceRange(raw, end-1, end-1, insertion), nil
+	return replaceRange(raw, insertAt, insertAt, insertion), nil
+}
+
+func objectMemberIndent(raw []byte, start int, end int) string {
+	for i := start + 1; i < end-1; i++ {
+		if raw[i] == '\n' || raw[i] == '\r' {
+			j := i + 1
+			spaces := 0
+			for j+spaces < end-1 && raw[j+spaces] == ' ' {
+				spaces++
+			}
+			if j+spaces < end-1 && raw[j+spaces] != '\n' && raw[j+spaces] != '\r' {
+				return strings.Repeat(" ", spaces)
+			}
+		}
+	}
+	return parentIndent(raw, start) + "  "
+}
+
+func parentIndent(raw []byte, pos int) string {
+	lineStart := pos
+	for lineStart > 0 && raw[lineStart-1] != '\n' && raw[lineStart-1] != '\r' {
+		lineStart--
+	}
+	spaces := 0
+	for lineStart+spaces < len(raw) && raw[lineStart+spaces] == ' ' {
+		spaces++
+	}
+	return strings.Repeat(" ", spaces)
 }
 
 func indentMultiline(value []byte, prefix string) []byte {

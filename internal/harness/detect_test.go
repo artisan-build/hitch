@@ -169,6 +169,71 @@ func TestCodexHomeDetection(t *testing.T) {
 	}
 }
 
+func TestOpencodeConfigDirDetection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		setup    func(t *testing.T, home string) Env
+		detected bool
+		path     func(home string) string
+	}{
+		{
+			name: "unset OPENCODE_CONFIG_DIR uses XDG default",
+			setup: func(t *testing.T, home string) Env {
+				t.Helper()
+				env := testEnv(home)
+				mkdir(t, filepath.Join(env.XDGConfigHome, "opencode"))
+				return env
+			},
+			detected: true,
+			path: func(home string) string {
+				return filepath.Join(home, ".config", "opencode", "opencode.json")
+			},
+		},
+		{
+			name: "OPENCODE_CONFIG_DIR set and exists",
+			setup: func(t *testing.T, home string) Env {
+				t.Helper()
+				env := testEnv(home)
+				env.OpencodeConfigDir = filepath.Join(home, "opencode-config")
+				mkdir(t, env.OpencodeConfigDir)
+				return env
+			},
+			detected: true,
+			path: func(home string) string {
+				return filepath.Join(home, "opencode-config", "opencode.json")
+			},
+		},
+		{
+			name: "OPENCODE_CONFIG_DIR set and missing",
+			setup: func(_ *testing.T, home string) Env {
+				env := testEnv(home)
+				env.OpencodeConfigDir = filepath.Join(home, "missing-opencode-config")
+				return env
+			},
+			path: func(home string) string {
+				return filepath.Join(home, "missing-opencode-config", "opencode.json")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			env := tt.setup(t, home)
+			result := detectByID(t, env, "opencode")
+			if result.Detected != tt.detected {
+				t.Fatalf("opencode detected = %v, want %v", result.Detected, tt.detected)
+			}
+			if result.ConfigPath != tt.path(home) {
+				t.Fatalf("opencode config path = %q, want %q", result.ConfigPath, tt.path(home))
+			}
+		})
+	}
+}
+
 func TestDetectEmptyHome(t *testing.T) {
 	t.Parallel()
 
@@ -299,6 +364,48 @@ func TestConfigPathPerGOOS(t *testing.T) {
 	}
 }
 
+func TestVSCodeUserDataOverrides(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		env  Env
+		want string
+	}{
+		{
+			name: "VSCODE_PORTABLE wins over VSCODE_APPDATA",
+			env:  Env{Home: "/home/test", XDGConfigHome: "/xdg", AppData: "/appdata", VSCodePortable: "/portable", VSCodeAppData: "/vscode-appdata", GOOS: "linux"},
+			want: filepath.Join("/portable", "user-data", "User", "mcp.json"),
+		},
+		{
+			name: "VSCODE_APPDATA before platform default",
+			env:  Env{Home: "/home/test", XDGConfigHome: "/xdg", AppData: "/appdata", VSCodeAppData: "/vscode-appdata", GOOS: "linux"},
+			want: filepath.Join("/vscode-appdata", "Code", "User", "mcp.json"),
+		},
+		{
+			name: "platform default after overrides",
+			env:  Env{Home: "/home/test", XDGConfigHome: "/xdg", AppData: "/appdata", GOOS: "linux"},
+			want: filepath.Join("/xdg", "Code", "User", "mcp.json"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok, err := ConfigPath("vscode", tt.env)
+			if err != nil {
+				t.Fatalf("ConfigPath returned error: %v", err)
+			}
+			if !ok {
+				t.Fatalf("VS Code client path not found")
+			}
+			if got != tt.want {
+				t.Fatalf("VS Code path = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestZedDarwinIgnoresXDGConfigHome(t *testing.T) {
 	t.Parallel()
 
@@ -313,6 +420,29 @@ func TestZedDarwinIgnoresXDGConfigHome(t *testing.T) {
 	want := filepath.Join("/home/test", ".config", "zed", "settings.json")
 	if got != want {
 		t.Fatalf("Zed darwin path = %q, want %q", got, want)
+	}
+}
+
+func TestZedAndOpencodeDarwinXDGSourceDifference(t *testing.T) {
+	t.Parallel()
+
+	// Zed source: zed-industries/zed crates/paths/src/paths.rs config_dir()
+	// hardcodes ~/.config/zed on macOS. opencode source: sst/opencode
+	// packages/core/src/global.ts uses xdg-basedir and honors XDG_CONFIG_HOME.
+	env := Env{Home: "/home/test", XDGConfigHome: "/elsewhere", AppData: "/appdata", GOOS: "darwin"}
+	zed, ok, err := ConfigPath("zed", env)
+	if err != nil || !ok {
+		t.Fatalf("Zed ConfigPath = %q, %v, %v", zed, ok, err)
+	}
+	opencode, ok, err := ConfigPath("opencode", env)
+	if err != nil || !ok {
+		t.Fatalf("opencode ConfigPath = %q, %v, %v", opencode, ok, err)
+	}
+	if zed != filepath.Join("/home/test", ".config", "zed", "settings.json") {
+		t.Fatalf("Zed darwin path = %q", zed)
+	}
+	if opencode != filepath.Join("/elsewhere", "opencode", "opencode.json") {
+		t.Fatalf("opencode darwin path = %q", opencode)
 	}
 }
 
@@ -341,6 +471,9 @@ func TestConfigPathRejectsNonAbsoluteOverrideVariables(t *testing.T) {
 		{name: "APPDATA", env: Env{Home: "/home/test", AppData: "relative-appdata", GOOS: "windows"}, id: "vscode", want: "APPDATA"},
 		{name: "CLAUDE_CONFIG_DIR", env: Env{Home: "/home/test", ClaudeConfigDir: "relative-claude", GOOS: "darwin"}, id: "claude-code", want: "CLAUDE_CONFIG_DIR"},
 		{name: "CODEX_HOME", env: Env{Home: "/home/test", CodexHome: "relative-codex", GOOS: "darwin"}, id: "codex", want: "CODEX_HOME"},
+		{name: "OPENCODE_CONFIG_DIR", env: Env{Home: "/home/test", OpencodeConfigDir: "relative-opencode", GOOS: "darwin"}, id: "opencode", want: "OPENCODE_CONFIG_DIR"},
+		{name: "VSCODE_PORTABLE", env: Env{Home: "/home/test", VSCodePortable: "relative-portable", GOOS: "darwin"}, id: "vscode", want: "VSCODE_PORTABLE"},
+		{name: "VSCODE_APPDATA", env: Env{Home: "/home/test", VSCodeAppData: "relative-vscode-appdata", GOOS: "darwin"}, id: "vscode", want: "VSCODE_APPDATA"},
 	}
 
 	for _, tt := range tests {
