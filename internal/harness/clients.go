@@ -117,15 +117,15 @@ func opencodeConfigPath(env Env) (string, error) {
 func claudeDesktopMarkerPath(env Env) (string, error) {
 	switch env.GOOS {
 	case "darwin":
-		return joinAbs(env.Home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+		return joinAbs(env.Home, "Library", "Application Support", "Claude")
 	case "windows":
 		base := env.AppData
 		if base == "" {
 			base = join(env.Home, "AppData", "Roaming")
 		}
-		return joinAbs(base, "Claude", "claude_desktop_config.json")
+		return joinAbs(base, "Claude")
 	default:
-		return joinAbs(env.xdgConfigHome(), "Claude", "claude_desktop_config.json")
+		return joinAbs(env.xdgConfigHome(), "Claude")
 	}
 }
 

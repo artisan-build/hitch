@@ -268,7 +268,7 @@ func TestPromptTierDetectionAndLabelData(t *testing.T) {
 
 	home := t.TempDir()
 	env := testEnv(home)
-	mkdir(t, filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"))
+	mkdir(t, filepath.Join(home, "Library", "Application Support", "Claude"))
 	mkdir(t, filepath.Join(home, "Library", "Application Support", "JetBrains"))
 
 	for _, id := range []string{"claude-desktop", "jetbrains"} {
