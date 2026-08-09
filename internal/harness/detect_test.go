@@ -76,13 +76,13 @@ func TestClaudeCodeDetection(t *testing.T) {
 func TestDetectAllClients(t *testing.T) {
 	t.Parallel()
 
-	for _, marker := range fileWriterMarkers() {
+	for _, marker := range expectedFileWriterClients() {
 		marker := marker
-		t.Run(marker.client.ID, func(t *testing.T) {
+		t.Run(marker.id, func(t *testing.T) {
 			t.Parallel()
 			home := t.TempDir()
 			env := testEnv(home)
-			marker.create(t, env)
+			mkdir(t, marker.markerPath(t, env))
 
 			results, err := Detect(env)
 			if err != nil {
@@ -93,9 +93,12 @@ func TestDetectAllClients(t *testing.T) {
 				if result.PromptTier {
 					continue
 				}
-				want := result.ID == marker.client.ID
+				want := result.ID == marker.id
 				if result.Detected != want {
 					t.Fatalf("%s detected = %v, want %v", result.ID, result.Detected, want)
+				}
+				if result.ID == marker.id && result.ConfigPath != marker.configPath(t, env) {
+					t.Fatalf("%s config path = %q, want %q", result.ID, result.ConfigPath, marker.configPath(t, env))
 				}
 			}
 		})
@@ -138,15 +141,49 @@ func TestDetectionDoesNotReadContents(t *testing.T) {
 			t.Parallel()
 			home := t.TempDir()
 			env := testEnv(home)
-			path := cursorConfigPath(env)
+			path := filepath.Join(home, ".claude.json")
 			writeFile(t, path, tt.body, tt.mode)
 			if tt.mode == 0 {
 				t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 			}
 
-			result := detectByID(t, env, "cursor")
+			if _, err := os.Stat(filepath.Join(home, ".claude")); !os.IsNotExist(err) {
+				t.Fatalf("fixture must not create Claude Code marker dir; stat err = %v", err)
+			}
+
+			result := detectByID(t, env, "claude-code")
 			if !result.Detected {
-				t.Fatalf("Cursor was not detected")
+				t.Fatalf("Claude Code was not detected")
+			}
+		})
+	}
+}
+
+func TestConfigPathLiteralTable(t *testing.T) {
+	t.Parallel()
+
+	home := "/home/test"
+	env := Env{Home: home, XDGConfigHome: filepath.Join(home, ".config"), AppData: filepath.Join(home, "AppData", "Roaming"), GOOS: "darwin"}
+	for _, client := range expectedFileWriterClients() {
+		client := client
+		t.Run(client.id, func(t *testing.T) {
+			t.Parallel()
+			got, ok, err := ConfigPath(client.id, env)
+			if err != nil {
+				t.Fatalf("ConfigPath returned error: %v", err)
+			}
+			if !ok {
+				t.Fatalf("ConfigPath did not find %s", client.id)
+			}
+			want := client.configPath(t, env)
+			if got != want {
+				t.Fatalf("ConfigPath(%s) = %q, want %q", client.id, got, want)
+			}
+			if !filepath.IsAbs(got) {
+				t.Fatalf("ConfigPath(%s) = %q, want absolute", client.id, got)
+			}
+			if client.shapeSuffix != "" && !strings.HasSuffix(filepath.ToSlash(got), client.shapeSuffix) {
+				t.Fatalf("ConfigPath(%s) = %q, want suffix %q", client.id, got, client.shapeSuffix)
 			}
 		})
 	}
@@ -169,7 +206,10 @@ func TestConfigPathPerGOOS(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			env := Env{Home: "/home/test", XDGConfigHome: "/xdg", AppData: "/appdata", GOOS: tt.goos}
-			got, ok := ConfigPath("vscode", env)
+			got, ok, err := ConfigPath("vscode", env)
+			if err != nil {
+				t.Fatalf("ConfigPath returned error: %v", err)
+			}
 			if !ok {
 				t.Fatalf("VS Code client path not found")
 			}
@@ -180,6 +220,68 @@ func TestConfigPathPerGOOS(t *testing.T) {
 				t.Fatalf("VS Code path %q does not end with Code/User/mcp.json", got)
 			}
 		})
+	}
+}
+
+func TestConfigPathRejectsEmptyHome(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := ConfigPath("cursor", Env{GOOS: "darwin"})
+	if err == nil {
+		t.Fatalf("ConfigPath with empty home returned nil error")
+	}
+	if !strings.Contains(err.Error(), "HOME") || !strings.Contains(err.Error(), "USERPROFILE") {
+		t.Fatalf("ConfigPath error = %q, want HOME and USERPROFILE", err.Error())
+	}
+}
+
+func TestAllResolvedPathsAreAbsolute(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t.TempDir())
+	for _, client := range AllClients() {
+		client := client
+		t.Run(client.ID, func(t *testing.T) {
+			t.Parallel()
+			if client.ConfigPath != nil {
+				path, err := client.ConfigPath(env)
+				if err != nil {
+					t.Fatalf("ConfigPath returned error: %v", err)
+				}
+				if !filepath.IsAbs(path) {
+					t.Fatalf("config path = %q, want absolute", path)
+				}
+			}
+			marker, err := markerPath(client, env)
+			if err != nil {
+				t.Fatalf("markerPath returned error: %v", err)
+			}
+			if !filepath.IsAbs(marker) {
+				t.Fatalf("marker path = %q, want absolute", marker)
+			}
+		})
+	}
+}
+
+func TestPromptTierDetectionAndLabelData(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	env := testEnv(home)
+	mkdir(t, filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"))
+	mkdir(t, filepath.Join(home, "Library", "Application Support", "JetBrains"))
+
+	for _, id := range []string{"claude-desktop", "jetbrains"} {
+		result := detectByID(t, env, id)
+		if !result.PromptTier {
+			t.Fatalf("%s PromptTier = false, want true", id)
+		}
+		if !result.Detected {
+			t.Fatalf("%s Detected = false, want true", id)
+		}
+		if result.ConfigPath != "" {
+			t.Fatalf("%s ConfigPath = %q, want empty", id, result.ConfigPath)
+		}
 	}
 }
 
@@ -207,24 +309,40 @@ func testEnv(home string) Env {
 	}
 }
 
-type clientMarker struct {
-	client Client
-	create func(t *testing.T, env Env)
+type expectedClient struct {
+	id          string
+	shapeSuffix string
+	configPath  func(t *testing.T, env Env) string
+	markerPath  func(t *testing.T, env Env) string
 }
 
-func fileWriterMarkers() []clientMarker {
-	markers := make([]clientMarker, 0, len(FileWriterClients()))
-	for _, client := range FileWriterClients() {
-		client := client
-		markers = append(markers, clientMarker{
-			client: client,
-			create: func(t *testing.T, env Env) {
-				t.Helper()
-				mkdir(t, markerPath(client, env))
-			},
-		})
+func expectedFileWriterClients() []expectedClient {
+	return []expectedClient{
+		{id: "claude-code", shapeSuffix: ".claude.json", configPath: literalPath(".claude.json"), markerPath: literalPath(".claude")},
+		{id: "cursor", shapeSuffix: ".cursor/mcp.json", configPath: literalPath(".cursor", "mcp.json"), markerPath: literalPath(".cursor")},
+		{id: "codex", shapeSuffix: ".codex/config.toml", configPath: literalPath(".codex", "config.toml"), markerPath: literalPath(".codex")},
+		{id: "windsurf", shapeSuffix: ".codeium/windsurf/mcp_config.json", configPath: literalPath(".codeium", "windsurf", "mcp_config.json"), markerPath: literalPath(".codeium", "windsurf")},
+		{id: "zed", shapeSuffix: ".config/zed/settings.json", configPath: xdgLiteralPath("zed", "settings.json"), markerPath: xdgLiteralPath("zed")},
+		{id: "vscode", shapeSuffix: "Code/User/mcp.json", configPath: literalPath("Library", "Application Support", "Code", "User", "mcp.json"), markerPath: literalPath("Library", "Application Support", "Code", "User")},
+		{id: "gemini-cli", shapeSuffix: ".gemini/settings.json", configPath: literalPath(".gemini", "settings.json"), markerPath: literalPath(".gemini")},
+		{id: "opencode", shapeSuffix: ".config/opencode/opencode.json", configPath: xdgLiteralPath("opencode", "opencode.json"), markerPath: xdgLiteralPath("opencode")},
 	}
-	return markers
+}
+
+func literalPath(elem ...string) func(t *testing.T, env Env) string {
+	return func(t *testing.T, env Env) string {
+		t.Helper()
+		parts := append([]string{env.Home}, elem...)
+		return filepath.Join(parts...)
+	}
+}
+
+func xdgLiteralPath(elem ...string) func(t *testing.T, env Env) string {
+	return func(t *testing.T, env Env) string {
+		t.Helper()
+		parts := append([]string{env.XDGConfigHome}, elem...)
+		return filepath.Join(parts...)
+	}
 }
 
 func mkdir(t *testing.T, path string) {

@@ -15,7 +15,7 @@ var (
 	Date    = "unknown"
 )
 
-func NewRootCommand() *cobra.Command {
+func NewRootCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "hitch",
 		Short:         "Install MCP servers into coding agents safely",
@@ -27,7 +27,7 @@ func NewRootCommand() *cobra.Command {
 	root.SetHelpCommand(&cobra.Command{Hidden: true})
 
 	root.AddCommand(newVersionCommand())
-	root.AddCommand(newListCommand(harness.CurrentEnv))
+	root.AddCommand(newListCommand(envFn))
 
 	return root
 }
@@ -43,12 +43,16 @@ func newVersionCommand() *cobra.Command {
 	}
 }
 
-func newListCommand(envFn func() harness.Env) *cobra.Command {
+func newListCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List detected coding-agent harnesses",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runList(cmd.OutOrStdout(), envFn())
+			env, err := envFn()
+			if err != nil {
+				return err
+			}
+			return runList(cmd.OutOrStdout(), env)
 		},
 	}
 }
@@ -65,14 +69,31 @@ func runList(out io.Writer, env harness.Env) error {
 			status = "detected"
 		}
 		if result.PromptTier {
-			status += " (prompt-tier)"
+			status += " (prompt-tier - use 'hitch prompt')"
 		}
-		if _, err := fmt.Fprintf(out, "%s\t%s\t%s\n", result.Name, result.ConfigPath, status); err != nil {
+
+		path := result.ConfigPath
+		if path == "" {
+			path = "-"
+		}
+		if _, err := fmt.Fprintf(out, "%s\t%s\t%s\n", result.Name, path, status); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func Main(args []string, stdout io.Writer, stderr io.Writer, envFn func() (harness.Env, error)) int {
+	root := NewRootCommand(envFn)
+	root.SetArgs(args)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	if err := root.Execute(); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
 }
 
 func ExecuteForTest(root *cobra.Command, args ...string) error {

@@ -4,10 +4,9 @@ import (
 	"os"
 
 	"github.com/artisan-build/hitch/internal/cmd"
+	"github.com/artisan-build/hitch/internal/harness"
 )
 
 func main() {
-	if err := cmd.NewRootCommand().Execute(); err != nil {
-		os.Exit(1)
-	}
+	os.Exit(cmd.Main(os.Args[1:], os.Stdout, os.Stderr, harness.CurrentEnv))
 }

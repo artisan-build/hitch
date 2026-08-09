@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ func TestVersionCommand(t *testing.T) {
 	Version, Commit, Date = "v9.9.9", "abc123", "2026-08-09"
 	t.Cleanup(func() { Version, Commit, Date = oldVersion, oldCommit, oldDate })
 
-	root := NewRootCommand()
+	root := NewRootCommand(func() (harness.Env, error) { return harness.Env{}, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&bytes.Buffer{})
@@ -32,7 +33,7 @@ func TestVersionCommand(t *testing.T) {
 }
 
 func TestHelpListsOnlyPR1Commands(t *testing.T) {
-	root := NewRootCommand()
+	root := NewRootCommand(func() (harness.Env, error) { return harness.Env{}, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&bytes.Buffer{})
@@ -68,14 +69,22 @@ func TestListWritesNothing(t *testing.T) {
 	writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{}", 0o600)
 	before := snapshotTree(t, home)
 
-	root := NewRootCommand()
+	root := NewRootCommand(func() (harness.Env, error) { return env, nil })
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&bytes.Buffer{})
 	root.SetArgs([]string{"list"})
-	root.Commands()[1] = newListCommand(func() harness.Env { return env })
 	if err := root.Execute(); err != nil {
 		t.Fatalf("list command returned error: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"Cursor", filepath.Join(home, ".cursor", "mcp.json"), "detected", "Claude Desktop", "prompt-tier - use 'hitch prompt'"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("list output %q does not contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, filepath.Join(home, "Library", "Application Support", "JetBrains")) {
+		t.Fatalf("list output printed prompt-tier marker path: %q", got)
 	}
 	after := snapshotTree(t, home)
 	if len(before) != len(after) {
@@ -89,6 +98,44 @@ func TestListWritesNothing(t *testing.T) {
 		if afterState != beforeState {
 			t.Fatalf("path %q changed: before %#v after %#v", path, beforeState, afterState)
 		}
+	}
+}
+
+func TestUnknownCommandReturnsError(t *testing.T) {
+	root := NewRootCommand(func() (harness.Env, error) { return harness.Env{}, nil })
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	if err := ExecuteForTest(root, "bogus"); err == nil {
+		t.Fatalf("unknown command returned nil error")
+	}
+}
+
+func TestMainUnknownCommandExitsNonZeroWithStderr(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"bogus"}, &stdout, &stderr, func() (harness.Env, error) { return harness.Env{}, nil })
+	if code == 0 {
+		t.Fatalf("Main exit code = 0, want non-zero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if stderr.Len() == 0 {
+		t.Fatalf("stderr is empty")
+	}
+}
+
+func TestListMissingHomeErrorsLoudly(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"list"}, &stdout, &stderr, func() (harness.Env, error) {
+		return harness.Env{}, errors.New("could not resolve user home from HOME or USERPROFILE")
+	})
+	if code == 0 {
+		t.Fatalf("Main exit code = 0, want non-zero")
+	}
+	if !strings.Contains(stderr.String(), "HOME") || !strings.Contains(stderr.String(), "USERPROFILE") {
+		t.Fatalf("stderr = %q, want HOME and USERPROFILE", stderr.String())
 	}
 }
 
