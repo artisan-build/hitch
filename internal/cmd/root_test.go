@@ -31,6 +31,25 @@ func TestVersionCommand(t *testing.T) {
 	}
 }
 
+func TestHelpListsOnlyPR1Commands(t *testing.T) {
+	root := NewRootCommand()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&bytes.Buffer{})
+	if err := ExecuteForTest(root, "--help"); err != nil {
+		t.Fatalf("help command returned error: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"list", "version"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("help output %q does not contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "completion") {
+		t.Fatalf("help output includes Cobra completion command: %q", got)
+	}
+}
+
 type fileSnapshot map[string]fileState
 
 type fileState struct {

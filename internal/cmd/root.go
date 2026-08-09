@@ -23,6 +23,7 @@ func NewRootCommand() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	root.CompletionOptions.DisableDefaultCmd = true
 
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newListCommand(harness.CurrentEnv))
