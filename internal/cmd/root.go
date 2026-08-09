@@ -179,7 +179,11 @@ func parseHeaders(values []string) (map[string]string, error) {
 	for _, value := range values {
 		key, val, ok := strings.Cut(value, ":")
 		if !ok || strings.TrimSpace(key) == "" {
-			return nil, fmt.Errorf("invalid --header %q; use 'K: V'", value)
+			candidate := strings.Fields(value)
+			if len(candidate) > 0 && strings.TrimSpace(candidate[0]) != "" {
+				return nil, fmt.Errorf("invalid --header for key %q; use 'K: V'", candidate[0])
+			}
+			return nil, fmt.Errorf("invalid --header; use 'K: V'")
 		}
 		headers[strings.TrimSpace(key)] = strings.TrimSpace(val)
 	}

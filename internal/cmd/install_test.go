@@ -89,6 +89,25 @@ func TestInstallCLIHidesTokenOnSuccessAndDryRun(t *testing.T) {
 	}
 }
 
+func TestInstallHeaderParseErrorDoesNotEchoSecret(t *testing.T) {
+	home := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--client", "cursor", "--header", "X-Api-Key SUPERSECRET_NO_COLON"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero")
+	}
+	combined := stdout.String() + stderr.String()
+	if strings.Contains(combined, "SUPERSECRET_NO_COLON") || strings.Contains(combined, "X-Api-Key SUPERSECRET_NO_COLON") {
+		t.Fatalf("header parse error leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "X-Api-Key") {
+		t.Fatalf("header parse error should name only the key; stderr=%q", stderr.String())
+	}
+}
+
 func TestInstallDoesNotPrintCodexEnvLineWhenCodexNotTargeted(t *testing.T) {
 	home := t.TempDir()
 	var stdout bytes.Buffer

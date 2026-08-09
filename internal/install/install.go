@@ -578,29 +578,126 @@ func writeTOMLEntry(path string, key string, name string, entry map[string]any) 
 	if err != nil {
 		return err
 	}
-	doc := map[string]any{}
 	if existed && len(bytes.TrimSpace(raw)) > 0 {
-		if _, err := toml.Decode(string(raw), &doc); err != nil {
+		decoded := map[string]any{}
+		if _, err := toml.Decode(string(raw), &decoded); err != nil {
 			return fmt.Errorf("existing config %s is not valid TOML (%v); fix or remove it, then retry", path, err)
 		}
-		if regexp.MustCompile(`(?m)^\s*mcp_servers\s*=`).Find(raw) != nil {
+		if hasTopLevelInlineTOMLTable(raw, key) {
 			return fmt.Errorf("existing config %s uses an inline table for mcp_servers; convert it to a [mcp_servers] table, then retry", path)
 		}
 	}
-	servers, ok := doc[key].(map[string]any)
-	if !ok {
-		servers = map[string]any{}
-		doc[key] = servers
-	}
-	servers[name] = map[string]any{
-		"url":                  entry["url"],
-		"bearer_token_env_var": entry["bearer_token_env_var"],
-	}
-	updated, err := toml.Marshal(doc)
-	if err != nil {
-		return err
-	}
+	block := []byte(fmt.Sprintf("[%s.%s]\nurl = %q\nbearer_token_env_var = %q\n", key, name, entry["url"], entry["bearer_token_env_var"]))
+	updated := setTOMLTable(raw, key, name, block)
 	return writeAtomic(path, updated)
+}
+
+func setTOMLTable(raw []byte, key string, name string, block []byte) []byte {
+	span, ok := findTOMLTableSpan(raw, key, name)
+	if ok {
+		return replaceRange(raw, span.start, span.end, block)
+	}
+	trimmed := bytes.TrimRight(raw, "\n")
+	if len(trimmed) == 0 {
+		return block
+	}
+	out := append([]byte{}, trimmed...)
+	out = append(out, []byte("\n\n")...)
+	out = append(out, block...)
+	return out
+}
+
+func findTOMLTableSpan(raw []byte, key string, name string) (byteRange, bool) {
+	target := key + "." + name
+	start := -1
+	for offset := 0; offset < len(raw); {
+		lineStart := offset
+		lineEnd := offset
+		for lineEnd < len(raw) && raw[lineEnd] != '\n' {
+			lineEnd++
+		}
+		next := lineEnd
+		if next < len(raw) {
+			next++
+		}
+		if header, ok := tomlHeaderName(raw[lineStart:lineEnd]); ok {
+			if start >= 0 {
+				return byteRange{start: start, end: tomlTableContentEnd(raw, start, lineStart)}, true
+			}
+			if header == target {
+				start = lineStart
+			}
+		}
+		offset = next
+	}
+	if start >= 0 {
+		return byteRange{start: start, end: len(raw)}, true
+	}
+	return byteRange{}, false
+}
+
+func tomlTableContentEnd(raw []byte, start int, nextHeaderStart int) int {
+	end := nextHeaderStart
+	for end > start {
+		lineStart := end
+		if lineStart > 0 && raw[lineStart-1] == '\n' {
+			lineStart--
+		}
+		for lineStart > start && raw[lineStart-1] != '\n' {
+			lineStart--
+		}
+		line := bytes.TrimSpace(raw[lineStart:end])
+		if len(line) == 0 || bytes.HasPrefix(line, []byte("#")) {
+			end = lineStart
+			continue
+		}
+		break
+	}
+	return end
+}
+
+func tomlHeaderName(line []byte) (string, bool) {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) < 3 || trimmed[0] != '[' {
+		return "", false
+	}
+	if len(trimmed) >= 4 && trimmed[1] == '[' {
+		end := bytes.Index(trimmed, []byte("]]"))
+		if end < 0 {
+			return "", false
+		}
+		return strings.TrimSpace(string(trimmed[2:end])), true
+	}
+	end := bytes.IndexByte(trimmed, ']')
+	if end < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(string(trimmed[1:end])), true
+}
+
+func hasTopLevelInlineTOMLTable(raw []byte, key string) bool {
+	inTable := false
+	for offset := 0; offset < len(raw); {
+		lineEnd := offset
+		for lineEnd < len(raw) && raw[lineEnd] != '\n' {
+			lineEnd++
+		}
+		line := bytes.TrimSpace(raw[offset:lineEnd])
+		if _, ok := tomlHeaderName(line); ok {
+			inTable = true
+		}
+		if !inTable && bytes.HasPrefix(line, []byte(key)) {
+			rest := bytes.TrimSpace(line[len(key):])
+			if len(rest) > 0 && rest[0] == '=' {
+				return true
+			}
+		}
+		offset = lineEnd
+		if offset < len(raw) {
+			offset++
+		}
+	}
+	return false
 }
 
 func readExisting(path string) ([]byte, bool, error) {

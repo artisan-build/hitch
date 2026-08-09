@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/artisan-build/hitch/internal/harness"
@@ -161,90 +162,52 @@ func TestJSONUpdateTargetsOnlyTopLevelServerName(t *testing.T) {
 	}
 }
 
-func TestCodexParsedRewritePreservesFollowingData(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		body     string
-		assert   func(t *testing.T, data map[string]any, raw string)
-		comments bool
-	}{
-		{
-			name: "array of tables after our table",
-			body: "[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n[[projects]]\npath = \"/x\"\ntrust_level = \"trusted\"\n",
-			assert: func(t *testing.T, data map[string]any, _ string) {
-				t.Helper()
-				projects := data["projects"].([]map[string]any)
-				if len(projects) != 1 || projects[0]["path"] != "/x" || projects[0]["trust_level"] != "trusted" {
-					t.Fatalf("projects array-of-tables not preserved: %#v", data["projects"])
-				}
-			},
-		},
-		{
-			name:     "comment then table after our table",
-			body:     "[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n# user comment\n[profile]\nname = \"default\"\n",
-			comments: true,
-			assert: func(t *testing.T, data map[string]any, raw string) {
-				t.Helper()
-				if data["profile"].(map[string]any)["name"] != "default" {
-					t.Fatalf("following table not preserved: %#v", data)
-				}
-				if strings.Contains(raw, "# user comment") {
-					t.Fatalf("BurntSushi/toml unexpectedly preserved comments; update the documented comment-loss decision")
-				}
-			},
-		},
-		{
-			name: "plain table after our table",
-			body: "[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n[profile]\nname = \"default\"\n",
-			assert: func(t *testing.T, data map[string]any, _ string) {
-				t.Helper()
-				if data["profile"].(map[string]any)["name"] != "default" {
-					t.Fatalf("plain table not preserved: %#v", data)
-				}
-			},
-		},
-		{
-			name: "our table at EOF",
-			body: "[profile]\nname = \"default\"\n\n[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n",
-			assert: func(t *testing.T, data map[string]any, _ string) {
-				t.Helper()
-				if data["profile"].(map[string]any)["name"] != "default" {
-					t.Fatalf("preceding table not preserved: %#v", data)
-				}
-			},
-		},
-		{
-			name: "our table first with sections after",
-			body: "[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n[profile]\nname = \"default\"\n\n[settings]\nsandbox = \"workspace-write\"\n",
-			assert: func(t *testing.T, data map[string]any, _ string) {
-				t.Helper()
-				if data["profile"].(map[string]any)["name"] != "default" || data["settings"].(map[string]any)["sandbox"] != "workspace-write" {
-					t.Fatalf("following sections not preserved: %#v", data)
-				}
-			},
-		},
+func TestCodexRewriteChangesOnlyOwnTableSpan(t *testing.T) {
+	oldTZ := os.Getenv("TZ")
+	oldLocal := time.Local
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load non-UTC location: %v", err)
 	}
+	t.Setenv("TZ", "America/Chicago")
+	time.Local = loc
+	t.Cleanup(func() {
+		time.Local = oldLocal
+		_ = os.Setenv("TZ", oldTZ)
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			home := t.TempDir()
-			path := expectedPath(home, "codex")
-			writeFile(t, path, tt.body, 0o600)
-			_, err := InstallRemote(baseOptions(testEnv(home), "codex"))
-			if err != nil {
-				t.Fatalf("InstallRemote returned error: %v", err)
-			}
-			raw := readFile(t, path)
-			data := readTOML(t, path)
-			server := data["mcp_servers"].(map[string]any)["renamed"].(map[string]any)
-			if server["url"] != testURL || server["bearer_token_env_var"] != "HITCH_TOKEN_RENAMED" {
-				t.Fatalf("codex server not updated: %#v", server)
-			}
-			tt.assert(t, data, raw)
-		})
+	home := t.TempDir()
+	path := expectedPath(home, "codex")
+	before := "# top comment\n" +
+		"[profile]\nname = \"default\"\nlocal_date_time = 1979-05-27T07:32:00\nlocal_time = 07:32:00\nlocal_date = 1979-05-27\noffset_dt = 1979-05-27T07:32:00Z\n\n" +
+		"[mcp_servers.other]\nurl = \"https://other/mcp\"\n\n" +
+		"[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n" +
+		"# project comment\n[[projects]]\npath = \"/x\"\ntrust_level = \"trusted\"\n"
+	span, ok := findTOMLTableSpan([]byte(before), "mcp_servers", "renamed")
+	if !ok {
+		t.Fatalf("fixture does not contain target table")
+	}
+	writeFile(t, path, before, 0o600)
+
+	_, err = InstallRemote(baseOptions(testEnv(home), "codex"))
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	after := readFile(t, path)
+	replacement := "[mcp_servers.renamed]\nurl = \"" + testURL + "\"\nbearer_token_env_var = \"HITCH_TOKEN_RENAMED\"\n"
+	if after[:span.start] != before[:span.start] {
+		t.Fatalf("prefix outside target table changed\nbefore:\n%s\nafter:\n%s", before[:span.start], after[:span.start])
+	}
+	if after[span.start:span.start+len(replacement)] != replacement {
+		t.Fatalf("replacement table = %q, want %q", after[span.start:span.start+len(replacement)], replacement)
+	}
+	if after[span.start+len(replacement):] != before[span.end:] {
+		t.Fatalf("suffix outside target table changed\nbefore:\n%s\nafter:\n%s", before[span.end:], after[span.start+len(replacement):])
+	}
+	for _, want := range []string{"# top comment", "# project comment", "local_date_time = 1979-05-27T07:32:00", "local_time = 07:32:00", "local_date = 1979-05-27", "offset_dt = 1979-05-27T07:32:00Z", "[[projects]]"} {
+		if !strings.Contains(after, want) {
+			t.Fatalf("after is missing %q:\n%s", want, after)
+		}
 	}
 }
 
