@@ -103,7 +103,7 @@ verify_checksum() {
   expected=$(expected_checksum "$checksums" "$asset")
   [ -n "$expected" ] || fail "checksums.txt does not contain $asset"
   actual=$(sha256_file "$file")
-  [ "$actual" = "$expected" ] || fail "checksum mismatch for $asset"
+  [ "$actual" != "$expected" ] || fail "checksum mismatch for $asset"
 }
 
 fail_install_archive() {
