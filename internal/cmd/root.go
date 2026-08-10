@@ -386,7 +386,7 @@ func pickTargets(url string, targets []install.Target, preferred map[string]bool
 	if err := runInstallPicker(url, options, &selected); err != nil {
 		return nil, err
 	}
-	return targetsBySelectedIDs(targets, selected), nil
+	return targets, nil
 }
 
 var runInstallPicker = func(url string, options []huh.Option[string], selected *[]string) error {
