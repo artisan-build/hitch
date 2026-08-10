@@ -374,6 +374,7 @@ func normalizeClientIDs(values []string) ([]string, error) {
 }
 
 func pickTargets(url string, targets []install.Target, preferred map[string]bool) ([]install.Target, error) {
+	return targets, nil
 	if len(targets) == 0 {
 		return nil, nil
 	}
