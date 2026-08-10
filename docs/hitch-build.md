@@ -225,7 +225,7 @@ INHERITED-UNVERIFIED is empty for the PR2 remote HTTP adapter matrix.
 
 | Client | Why |
 |---|---|
-| Codex | The config is TOML. PR2 ships the seven JSON writers and reports manual Codex setup instead of risking a lossy TOML rewrite. |
+| Codex | The config is TOML. Hitch prints manual setup instead of risking an install writer, but scan and uninstall support user-global Codex TOML with parser-provided byte ranges. |
 | Claude Desktop | MCP config is stdio-only; remote HTTP needs the `mcp-remote` proxy and a Node runtime. Writing a proxy entry would silently depend on local tooling. |
 | JetBrains | The MCP dialog has no Authorization-headers field. |
 
@@ -236,6 +236,11 @@ wording must include `hitch cannot configure Codex automatically yet` plus manua
 using `[mcp_servers.<name>]`, `bearer_token_env_var = "HITCH_TOKEN_<NAME>"`, and an
 `export HITCH_TOKEN_<NAME>=...` command. Explicit `--client codex` exits non-zero after printing
 those instructions; auto-detected Codex does not fail otherwise-successful JSON writes.
+
+For PR7, `hitch scan` and `hitch uninstall` support user-global `~/.codex/config.toml` only. Hitch
+still does not install Codex entries automatically. TOML removal parses with
+`github.com/pelletier/go-toml/v2/unstable`, uses parser-provided byte offsets, and splices exactly
+the matching server root plus its sub-tables without re-serializing the document.
 
 Failed TOML approaches in PR2, deliberately not kept:
 

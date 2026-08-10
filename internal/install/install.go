@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/artisan-build/hitch/internal/harness"
+	"github.com/pelletier/go-toml/v2/unstable"
 )
 
 const codexTokenPrefix = "HITCH_TOKEN_"
@@ -205,7 +206,11 @@ func ScanScoped(env harness.Env, name string, clientIDs []string, project bool) 
 				if len(selected) > 0 && !selected[detected.ID] {
 					continue
 				}
-				out = append(out, scanCodex(detected))
+				if name == "" {
+					out = append(out, scanCodex(detected))
+				} else {
+					out = append(out, scanCodexName(detected, name))
+				}
 			}
 			continue
 		}
@@ -216,6 +221,9 @@ func ScanScoped(env harness.Env, name string, clientIDs []string, project bool) 
 	}
 	if len(selected) > 0 && len(out) != len(selected) {
 		for id := range selected {
+			if id == "codex" {
+				continue
+			}
 			if _, ok := AdapterByClientID(id); !ok {
 				return nil, fmt.Errorf("unknown file-writer client %q", id)
 			}
@@ -259,8 +267,40 @@ func scanCodex(client harness.DetectionResult) ScanResult {
 	if !existed || len(bytes.TrimSpace(raw)) == 0 {
 		return result
 	}
-	result.Status = ScanUnreadable
-	result.Detail = "hitch cannot configure Codex automatically yet; cannot verify or remove Codex config"
+	entry, err := findCodexServer(raw, client.ConfigPath, "")
+	if err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	if entry.found {
+		result.Status = ScanHasEntry
+		result.HoldsCredential = entry.holdsCredential
+	}
+	return result
+}
+
+func scanCodexName(client harness.DetectionResult, name string) ScanResult {
+	result := ScanResult{Client: client, Path: client.ConfigPath, Status: ScanNoEntry}
+	raw, existed, err := readExisting(client.ConfigPath)
+	if err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	if !existed || len(bytes.TrimSpace(raw)) == 0 {
+		return result
+	}
+	entry, err := findCodexServer(raw, client.ConfigPath, name)
+	if err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	if entry.found {
+		result.Status = ScanHasEntry
+		result.HoldsCredential = entry.holdsCredential
+	}
 	return result
 }
 
@@ -378,7 +418,22 @@ func Uninstall(opts UninstallOptions) (UninstallResult, error) {
 	for _, target := range selected {
 		adapter, ok := AdapterByClientID(target.Client.ID)
 		if !ok {
-			return res, fmt.Errorf("unknown file-writer client %q", target.Client.ID)
+			if target.Client.ID != "codex" {
+				return res, fmt.Errorf("unknown file-writer client %q", target.Client.ID)
+			}
+			changed, err := RemoveCodexEntry(target.Path, name)
+			if err != nil {
+				target.Status = ScanUnreadable
+				target.Detail = err.Error()
+				res.Unreadable = append(res.Unreadable, target)
+				continue
+			}
+			if changed {
+				res.Removed = append(res.Removed, target)
+			} else {
+				res.NotPresent = append(res.NotPresent, target)
+			}
+			continue
 		}
 		changed, err := RemoveEntry(target.Path, adapter, name)
 		if err != nil {
@@ -918,8 +973,8 @@ func CodexTokenEnvVar(name string) string {
 
 func sanitizeName(name string) string {
 	name = strings.TrimSpace(strings.ToLower(name))
-	name = regexp.MustCompile(`[^a-z0-9_-]+`).ReplaceAllString(name, "-")
-	name = strings.Trim(name, "-_")
+	name = regexp.MustCompile(`[^a-z0-9_.-]+`).ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-_.")
 	return name
 }
 
@@ -1053,6 +1108,236 @@ func setJSONObjectEntry(raw []byte, key string, name string, entry map[string]an
 		return replaceRange(raw, serverRange.start, serverRange.end, indentMultiline(serverObject, valueContinuationIndent(raw, serverRange.start))), nil
 	}
 	return insertIntoObject(raw, keyRange.start, keyRange.end, name, serverObject)
+}
+
+type codexServerEntry struct {
+	found           bool
+	holdsCredential bool
+	rangeToRemove   byteRange
+}
+
+type codexExpression struct {
+	kind            unstable.Kind
+	path            []string
+	start           int
+	end             int
+	holdsCredential bool
+}
+
+func RemoveCodexEntry(path string, name string) (bool, error) {
+	content, changed, err := buildCodexRemoval(path, name)
+	if err != nil || !changed {
+		return changed, err
+	}
+	return true, writeAtomic(path, content)
+}
+
+func buildCodexRemoval(path string, name string) ([]byte, bool, error) {
+	raw, existed, err := readExisting(path)
+	if err != nil || !existed || len(bytes.TrimSpace(raw)) == 0 {
+		return nil, false, err
+	}
+	entry, err := findCodexServer(raw, path, name)
+	if err != nil || !entry.found {
+		return nil, false, err
+	}
+	return removeTOMLExpressionRange(raw, entry.rangeToRemove), true, nil
+}
+
+func findCodexServer(raw []byte, path string, name string) (codexServerEntry, error) {
+	expressions, err := parseCodexExpressions(raw, path)
+	if err != nil {
+		return codexServerEntry{}, err
+	}
+	var found []codexExpression
+	serverHasCredential := map[string]bool{}
+	for _, expr := range expressions {
+		if len(expr.path) < 2 || expr.path[0] != "mcp_servers" {
+			continue
+		}
+		serverName := expr.path[1]
+		if expr.holdsCredential {
+			serverHasCredential[serverName] = true
+		}
+		if name == "" || serverName == name {
+			if isCodexServerRoot(expr) {
+				found = append(found, expr)
+			}
+		}
+	}
+	if len(found) == 0 {
+		return codexServerEntry{}, nil
+	}
+	if name == "" {
+		return codexServerEntry{found: true, holdsCredential: serverHasCredential[found[0].path[1]]}, nil
+	}
+	if len(found) > 1 {
+		return codexServerEntry{}, fmt.Errorf("existing Codex config %s has multiple mcp_servers entries named %q; cannot verify", path, name)
+	}
+	root := found[0]
+	entry := codexServerEntry{found: true, holdsCredential: serverHasCredential[name] || root.holdsCredential}
+	if root.kind == unstable.KeyValue {
+		entry.rangeToRemove = byteRange{start: root.start, end: root.end}
+		return entry, nil
+	}
+	entry.rangeToRemove = codexTableRemovalRange(expressions, root, len(raw))
+	return entry, nil
+}
+
+func parseCodexExpressions(raw []byte, path string) ([]codexExpression, error) {
+	parser := unstable.Parser{KeepComments: true}
+	parser.Reset(raw)
+	currentTable := []string{}
+	expressions := []codexExpression{}
+	for parser.NextExpression() {
+		node := parser.Expression()
+		switch node.Kind {
+		case unstable.Table, unstable.ArrayTable:
+			keyPath, firstKeyOffset, err := tomlKeyPath(node)
+			if err != nil {
+				return nil, err
+			}
+			start, err := tomlTableHeaderStart(raw, firstKeyOffset)
+			if err != nil {
+				return nil, fmt.Errorf("existing Codex config %s has unreadable TOML table range: %w", path, err)
+			}
+			currentTable = append([]string{}, keyPath...)
+			expressions = append(expressions, codexExpression{kind: node.Kind, path: keyPath, start: start, end: start})
+		case unstable.KeyValue:
+			keyPath, _, err := tomlKeyPath(node)
+			if err != nil {
+				return nil, err
+			}
+			if len(currentTable) > 0 {
+				keyPath = append(append([]string{}, currentTable...), keyPath...)
+			}
+			expressions = append(expressions, codexExpression{
+				kind:            node.Kind,
+				path:            keyPath,
+				start:           int(node.Raw.Offset),
+				end:             int(node.Raw.Offset + node.Raw.Length),
+				holdsCredential: codexNodeHoldsCredential(node),
+			})
+		}
+	}
+	if err := parser.Error(); err != nil {
+		return nil, fmt.Errorf("existing Codex config %s is not valid TOML: %w", path, err)
+	}
+	return expressions, nil
+}
+
+func tomlKeyPath(node *unstable.Node) ([]string, int, error) {
+	keys := []string{}
+	firstOffset := -1
+	for it := node.Key(); it.Next(); {
+		keyNode := it.Node()
+		if keyNode.Kind != unstable.Key {
+			return nil, 0, errors.New("TOML key path contains a non-key node")
+		}
+		if firstOffset < 0 {
+			firstOffset = int(keyNode.Raw.Offset)
+		}
+		keys = append(keys, string(keyNode.Data))
+	}
+	if len(keys) == 0 || firstOffset < 0 {
+		return nil, 0, errors.New("TOML expression has no key path")
+	}
+	return keys, firstOffset, nil
+}
+
+func tomlTableHeaderStart(raw []byte, firstKeyOffset int) (int, error) {
+	for i := firstKeyOffset - 1; i >= 0; i-- {
+		switch raw[i] {
+		case '[':
+			return i, nil
+		case ' ', '\t':
+			continue
+		default:
+			return 0, errors.New("could not anchor table header from parser key range")
+		}
+	}
+	return 0, errors.New("could not anchor table header from parser key range")
+}
+
+func isCodexServerRoot(expr codexExpression) bool {
+	return len(expr.path) == 2 && expr.path[0] == "mcp_servers" && (expr.kind == unstable.Table || expr.kind == unstable.KeyValue)
+}
+
+func codexTableRemovalRange(expressions []codexExpression, root codexExpression, rawLen int) byteRange {
+	end := -1
+	for _, expr := range expressions {
+		if expr.start <= root.start {
+			continue
+		}
+		if hasTOMLPathPrefix(expr.path, root.path) {
+			continue
+		}
+		end = expr.start
+		break
+	}
+	if end < 0 {
+		end = rawLen
+	}
+	return byteRange{start: root.start, end: end}
+}
+
+func hasTOMLPathPrefix(path []string, prefix []string) bool {
+	if len(path) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if path[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func codexNodeHoldsCredential(node *unstable.Node) bool {
+	keyPath, _, err := tomlKeyPath(node)
+	if err == nil && len(keyPath) > 0 && keyPath[len(keyPath)-1] == "bearer_token" {
+		return true
+	}
+	return codexInlineTableHoldsCredential(node.Value())
+}
+
+func codexInlineTableHoldsCredential(node *unstable.Node) bool {
+	if node == nil || node.Kind != unstable.InlineTable {
+		return false
+	}
+	for children := node.Children(); children.Next(); {
+		child := children.Node()
+		if child.Kind != unstable.KeyValue {
+			continue
+		}
+		keyPath, _, err := tomlKeyPath(child)
+		if err == nil && len(keyPath) > 0 && keyPath[len(keyPath)-1] == "bearer_token" {
+			return true
+		}
+		if codexInlineTableHoldsCredential(child.Value()) {
+			return true
+		}
+	}
+	return false
+}
+
+func removeTOMLExpressionRange(raw []byte, span byteRange) []byte {
+	start := span.start
+	end := span.end
+	if start < 0 {
+		start = 0
+	}
+	if end > len(raw) {
+		end = len(raw)
+	}
+	if end < len(raw) && (raw[end] == '\r' || raw[end] == '\n') {
+		if raw[end] == '\r' && end+1 < len(raw) && raw[end+1] == '\n' {
+			end += 2
+		} else {
+			end++
+		}
+	}
+	return replaceRange(raw, start, end, nil)
 }
 
 func RemoveEntry(path string, adapter Adapter, name string) (bool, error) {

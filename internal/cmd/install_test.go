@@ -933,19 +933,22 @@ func TestScanAndUninstallCLIRefuseNameThatSanitizesDifferently(t *testing.T) {
 	}
 }
 
-func TestScanAndUninstallCLIReportCodexAsUnverifiable(t *testing.T) {
+func TestScanAndUninstallCLIHandleCodexTOML(t *testing.T) {
 	home := t.TempDir()
 	codexPath := filepath.Join(home, ".codex", "config.toml")
-	writeFile(t, codexPath, "[mcp_servers.example]\nurl = \"https://mcp.example.test/mcp\"\nbearer_token = \"CODEX_CLI_SECRET\"\n", 0o600)
+	writeFile(t, codexPath, "[mcp_servers.example]\nurl = \"https://mcp.example.test/mcp\"\nbearer_token_env_var = \"CODEX_CLI_SECRET_ENV\"\n", 0o600)
 	writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{\"mcpServers\":{\"example\":{\"url\":\"https://mcp.example.test/mcp\",\"headers\":{\"Authorization\":\"Bearer CURSOR_SECRET\"}}}}", 0o600)
 	for _, tt := range []struct {
 		args     []string
 		wantCode int
 		wantOut  string
 	}{
-		{args: []string{"scan", "example"}, wantCode: 0, wantOut: "Codex\t" + codexPath + "\tUNREADABLE - cannot verify (hitch cannot configure Codex automatically yet"},
-		{args: []string{"uninstall", "example", "--yes"}, wantCode: 1, wantOut: "UNREADABLE - cannot verify: Codex (" + codexPath + ") - hitch cannot configure Codex automatically yet"},
+		{args: []string{"scan", "example"}, wantCode: 0, wantOut: "Codex\t" + codexPath + "\thas entry (no credential)"},
+		{args: []string{"uninstall", "example", "--yes"}, wantCode: 0, wantOut: "Removed Codex \"example\""},
 	} {
+		if tt.args[0] == "uninstall" {
+			writeFile(t, codexPath, "[mcp_servers.example]\nurl = \"https://mcp.example.test/mcp\"\nbearer_token_env_var = \"CODEX_CLI_SECRET_ENV\"\n", 0o600)
+		}
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
 		code := Main(tt.args, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
@@ -955,7 +958,7 @@ func TestScanAndUninstallCLIReportCodexAsUnverifiable(t *testing.T) {
 		if !strings.Contains(stdout.String(), tt.wantOut) {
 			t.Fatalf("stdout missing %q: %q", tt.wantOut, stdout.String())
 		}
-		if strings.Contains(stdout.String()+stderr.String(), "CODEX_CLI_SECRET") || strings.Contains(stdout.String()+stderr.String(), "CURSOR_SECRET") {
+		if strings.Contains(stdout.String()+stderr.String(), "CODEX_CLI_SECRET_ENV") || strings.Contains(stdout.String()+stderr.String(), "CURSOR_SECRET") {
 			t.Fatalf("Codex reporting leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
 		}
 	}
@@ -1145,14 +1148,14 @@ func TestSelectUninstallTargetsHonorsChoicesAndExcludesUnreadable(t *testing.T) 
 	}
 }
 
-func TestPromptCLIIncludesManualClientsAndCodexNotYetImplemented(t *testing.T) {
+func TestPromptCLIIncludesManualClientsAndCodexManualInstallOnly(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Main([]string{"prompt", "mcp.example.test/mcp"}, &stdout, &stderr, func() (harness.Env, error) { return harness.Env{}, nil })
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
-	for _, want := range []string{"Claude Desktop", "JetBrains", "Codex", "hitch cannot configure Codex automatically yet", "https://mcp.example.test/mcp", "bearer_token_env_var"} {
+	for _, want := range []string{"Claude Desktop", "JetBrains", "Codex", "hitch does not install Codex automatically yet", "hitch scan and uninstall can verify and remove", "https://mcp.example.test/mcp", "bearer_token_env_var"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("prompt output missing %q:\n%s", want, stdout.String())
 		}

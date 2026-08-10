@@ -1042,35 +1042,184 @@ func TestDuplicateServerMapKeyIsUnreadableAndUnchanged(t *testing.T) {
 	}
 }
 
-func TestCodexScanAndUninstallAreExplicitlyUnverifiable(t *testing.T) {
+func TestCodexRemovalNoEntryNoOpIsByteIdentical(t *testing.T) {
+	t.Setenv("TZ", "Pacific/Chatham")
+
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	before := "# user comment\nlocal = 1979-05-27T07:32:00\n[mcp_servers.other]\nurl = \"https://other.test/mcp\"\nbearer_token_env_var = \"OTHER_TOKEN\"\n"
+	writeFile(t, path, before, 0o600)
+	content, changed, err := buildCodexRemoval(path, "missing-sentinel")
+	if err != nil {
+		t.Fatalf("buildCodexRemoval returned error: %v", err)
+	}
+	if changed || content != nil {
+		t.Fatalf("no-op changed = %v content = %q, want unchanged nil content", changed, string(content))
+	}
+	if got := readFile(t, path); got != before {
+		t.Fatalf("no-op Codex removal changed bytes\nbefore:\n%q\nafter:\n%q", before, got)
+	}
+}
+
+func TestCodexScanAndUninstallEveryServerSpelling(t *testing.T) {
+	t.Setenv("TZ", "Pacific/Chatham")
+
+	tests := []struct {
+		name       string
+		serverName string
+		before     string
+		after      string
+	}{
+		{
+			name:       "table bare key",
+			serverName: "sentinel",
+			before:     "title = \"keep\"\n\n[mcp_servers.sentinel]\nurl = \"https://sentinel.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_SENTINEL\"\n\n[mcp_servers.other]\nurl = \"https://other.test/mcp\"\n",
+			after:      "title = \"keep\"\n\n[mcp_servers.other]\nurl = \"https://other.test/mcp\"\n",
+		},
+		{
+			name:       "dotted inline key",
+			serverName: "sentinel",
+			before:     "title = \"keep\"\nmcp_servers.sentinel = { url = \"https://sentinel.test/mcp\", bearer_token_env_var = \"HITCH_TOKEN_SENTINEL\" }\n[mcp_servers.other]\nurl = \"https://other.test/mcp\"\n",
+			after:      "title = \"keep\"\n[mcp_servers.other]\nurl = \"https://other.test/mcp\"\n",
+		},
+		{
+			name:       "fully quoted table keys",
+			serverName: "sentinel",
+			before:     "title = \"keep\"\n[\"mcp_servers\".\"sentinel\"]\nurl = \"https://sentinel.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_SENTINEL\"\n[other]\nvalue = true\n",
+			after:      "title = \"keep\"\n[other]\nvalue = true\n",
+		},
+		{
+			name:       "partially quoted table key",
+			serverName: "sentinel",
+			before:     "title = \"keep\"\n[mcp_servers.\"sentinel\"]\nurl = \"https://sentinel.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_SENTINEL\"\n[other]\nvalue = true\n",
+			after:      "title = \"keep\"\n[other]\nvalue = true\n",
+		},
+		{
+			name:       "dash requires quoted key",
+			serverName: "codex-sentinel",
+			before:     "title = \"keep\"\n[mcp_servers.\"codex-sentinel\"]\nurl = \"https://sentinel.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_CODEX_SENTINEL\"\n[other]\nvalue = true\n",
+			after:      "title = \"keep\"\n[other]\nvalue = true\n",
+		},
+		{
+			name:       "dot requires quoted key",
+			serverName: "codex.sentinel",
+			before:     "title = \"keep\"\n[mcp_servers.\"codex.sentinel\"]\nurl = \"https://sentinel.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_CODEX_SENTINEL\"\n[other]\nvalue = true\n",
+			after:      "title = \"keep\"\n[other]\nvalue = true\n",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, ".codex", "config.toml")
+			writeFile(t, path, tt.before, 0o600)
+
+			scans, err := Scan(testEnv(home), tt.serverName, []string{"codex"})
+			if err != nil {
+				t.Fatalf("Scan returned error: %v", err)
+			}
+			if len(scans) != 1 || scans[0].Status != ScanHasEntry || scans[0].HoldsCredential {
+				t.Fatalf("Codex scan = %#v, want has-entry without persisted credential", scans)
+			}
+
+			res, err := Uninstall(UninstallOptions{Name: tt.serverName, Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+			if err != nil || len(res.Removed) != 1 || res.Removed[0].Client.ID != "codex" {
+				t.Fatalf("Uninstall err = %v result = %#v, want Codex removed", err, res)
+			}
+			if got := readFile(t, path); got != tt.after {
+				t.Fatalf("Codex uninstall bytes mismatch\nwant:\n%q\ngot:\n%q", tt.after, got)
+			}
+		})
+	}
+}
+
+func TestCodexUnparseableIsUnreadableAndUnchanged(t *testing.T) {
 	t.Parallel()
 
 	home := t.TempDir()
 	path := filepath.Join(home, ".codex", "config.toml")
-	before := "[mcp_servers.x]\nurl = \"https://x.test/mcp\"\nbearer_token = \"CODEX_SECRET\"\n"
+	before := "[mcp_servers.sentinel\nurl = \"https://sentinel.test/mcp\"\nbearer_token = \"CODEX_PARSE_SECRET\"\n"
 	writeFile(t, path, before, 0o600)
-	scans, err := Scan(testEnv(home), "x", nil)
+	scans, err := Scan(testEnv(home), "sentinel", []string{"codex"})
 	if err != nil {
 		t.Fatalf("Scan returned error: %v", err)
 	}
-	found := false
-	for _, scan := range scans {
-		if scan.Client.ID == "codex" {
-			found = true
-			if scan.Status != ScanUnreadable || !strings.Contains(scan.Detail, "Codex") {
-				t.Fatalf("Codex scan = %#v, want unreadable not-yet-implemented detail", scan)
-			}
-		}
+	if len(scans) != 1 || scans[0].Status != ScanUnreadable {
+		t.Fatalf("Codex scan = %#v, want unreadable", scans)
 	}
-	if !found {
-		t.Fatalf("scan omitted Codex: %#v", scans)
-	}
-	res, err := Uninstall(UninstallOptions{Name: "x", Yes: true, NonTTY: true, Env: testEnv(home)})
-	if err == nil || len(res.Unreadable) != 1 || res.Unreadable[0].Client.ID != "codex" {
-		t.Fatalf("Uninstall err = %v result = %#v, want Codex unreadable", err, res)
+	res, err := Uninstall(UninstallOptions{Name: "sentinel", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err == nil || len(res.Unreadable) != 1 || len(res.Removed) != 0 {
+		t.Fatalf("Uninstall err = %v result = %#v, want unreadable refusal", err, res)
 	}
 	if got := readFile(t, path); got != before {
-		t.Fatalf("Codex config changed to %q", got)
+		t.Fatalf("unreadable Codex config changed to %q", got)
+	}
+}
+
+func TestCodexRemovalLeavesParentTableAndRemovesSubtables(t *testing.T) {
+	t.Setenv("TZ", "Pacific/Chatham")
+
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	before := "[mcp_servers]\n\n[mcp_servers.sentinel]\nurl = \"https://sentinel.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_SENTINEL\"\n\n[mcp_servers.sentinel.env]\nKEEP = \"remove with sentinel\"\n\n[mcp_servers.other]\nurl = \"https://other.test/mcp\"\n"
+	after := "[mcp_servers]\n\n[mcp_servers.other]\nurl = \"https://other.test/mcp\"\n"
+	writeFile(t, path, before, 0o600)
+	res, err := Uninstall(UninstallOptions{Name: "sentinel", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err != nil || len(res.Removed) != 1 {
+		t.Fatalf("Uninstall err = %v result = %#v, want removal", err, res)
+	}
+	if got := readFile(t, path); got != after {
+		t.Fatalf("Codex parent/subtable bytes mismatch\nwant:\n%q\ngot:\n%q", after, got)
+	}
+}
+
+func TestCodexRealConfigCopyRemovalPreservesNodeReplEnvAndDatetimes(t *testing.T) {
+	t.Setenv("TZ", "Pacific/Chatham")
+
+	livePath := filepath.Join(os.Getenv("HOME"), ".codex", "config.toml")
+	live, err := os.ReadFile(livePath)
+	if err != nil {
+		t.Skipf("maintainer Codex config fixture unavailable: %v", err)
+	}
+	if len(live) != 3741 {
+		t.Skipf("maintainer Codex config size = %d, want 3741-byte fixture", len(live))
+	}
+	if !bytes.Contains(live, []byte("[mcp_servers.node_repl.env]")) || !bytes.Contains(live, []byte("computer-use")) {
+		t.Fatalf("real config fixture missing expected node_repl.env or computer-use positive controls")
+	}
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	sentinel := "[mcp_servers.\"hitch-pr7-sentinel\"]\nurl = \"https://hitch-pr7-sentinel.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_HITCH_PR7_SENTINEL\"\n"
+	before := string(live) + sentinel
+	writeFile(t, path, before, 0o600)
+
+	scans, err := Scan(testEnv(home), "hitch-pr7-sentinel", []string{"codex"})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(scans) != 1 || scans[0].Status != ScanHasEntry || scans[0].HoldsCredential {
+		t.Fatalf("real-copy Codex scan = %#v, want sentinel env-var entry", scans)
+	}
+	res, err := Uninstall(UninstallOptions{Name: "hitch-pr7-sentinel", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err != nil || len(res.Removed) != 1 {
+		t.Fatalf("Uninstall err = %v result = %#v, want sentinel removed", err, res)
+	}
+	if got := readFile(t, path); got != string(live) {
+		t.Fatalf("real-copy removal did not restore original bytes")
+	}
+	if !strings.Contains(readFile(t, path), "[mcp_servers.node_repl.env]") || !strings.Contains(readFile(t, path), "computer-use") {
+		t.Fatalf("real-copy removal damaged node_repl.env or computer-use")
+	}
+
+	nodeCopyHome := t.TempDir()
+	nodeCopyPath := filepath.Join(nodeCopyHome, ".codex", "config.toml")
+	writeFile(t, nodeCopyPath, string(live), 0o600)
+	nodeRes, err := Uninstall(UninstallOptions{Name: "node_repl", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(nodeCopyHome)})
+	if err != nil || len(nodeRes.Removed) != 1 {
+		t.Fatalf("node_repl uninstall err = %v result = %#v, want removal", err, nodeRes)
+	}
+	if strings.Contains(readFile(t, nodeCopyPath), "[mcp_servers.node_repl.env]") {
+		t.Fatalf("node_repl.env sub-table survived node_repl removal")
 	}
 }
 
@@ -1349,8 +1498,8 @@ func TestProjectCodexContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("global Scan returned error: %v", err)
 	}
-	if len(globalScans) != 1 || globalScans[0].Client.ID != "codex" || globalScans[0].Status != ScanUnreadable {
-		t.Fatalf("global Codex scan = %#v, want unreadable global Codex", globalScans)
+	if len(globalScans) != 1 || globalScans[0].Client.ID != "codex" || globalScans[0].Status != ScanHasEntry {
+		t.Fatalf("global Codex scan = %#v, want scannable global Codex", globalScans)
 	}
 }
 

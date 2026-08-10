@@ -28,8 +28,9 @@ Written by hitch: Claude Code · Cursor · Windsurf · Zed · VS Code · Gemini 
 
 Codex is detected but not configured automatically. When Codex is detected or selected, hitch prints
 manual `[mcp_servers.<name>]` instructions using `bearer_token_env_var` and an
-`export HITCH_TOKEN_<NAME>=...` command. `hitch scan` reports Codex as unverifiable rather than
-guessing, and `hitch uninstall` cannot remove a Codex entry.
+`export HITCH_TOKEN_<NAME>=...` command. `hitch scan` can verify user-global
+`~/.codex/config.toml`, and `hitch uninstall` can remove matching Codex entries without rewriting
+the rest of the TOML file.
 
 Claude Desktop and JetBrains are recognized but deliberately not written to. See the spec for why.
 
@@ -92,7 +93,8 @@ leaves the rest of the file exactly as it was.
 hitch prompt https://example.com/mcp
 ```
 
-Prints ready-to-follow instructions for Claude Desktop, JetBrains, and Codex.
+Prints ready-to-follow instructions for Claude Desktop, JetBrains, and manual Codex setup. Codex is
+manual-install only; `scan` and `uninstall` are supported for user-global Codex config.
 
 ## Not in v0.0.2
 
