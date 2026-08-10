@@ -137,6 +137,9 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				if strings.TrimSpace(command) == "" {
 					return exitError{err: fmt.Errorf("stdio install requires non-empty --command"), code: 2}
 				}
+				if strings.Contains(args[0], "://") {
+					return exitError{err: fmt.Errorf("stdio install requires a server name, not a URL; remove --command for remote installs"), code: 2}
+				}
 				if cmd.Flags().Changed("name") {
 					return exitError{err: fmt.Errorf("stdio install uses positional <name>; --name is only valid for remote installs"), code: 2}
 				}
@@ -267,6 +270,11 @@ func parseArgsCSV(value string) ([]string, error) {
 	}
 	if _, err := reader.Read(); err != io.EOF {
 		return nil, fmt.Errorf("invalid --args CSV: multiple records are not supported")
+	}
+	for _, arg := range args {
+		if arg == "" {
+			return nil, fmt.Errorf("invalid --args CSV: empty arguments are not supported")
+		}
 	}
 	return args, nil
 }
@@ -412,13 +420,13 @@ func printInstallSummary(out io.Writer, result install.Result, dryRun bool) erro
 		}
 	} else {
 		for _, written := range result.WrittenInfo {
-			if _, err := fmt.Fprintf(out, "Configured %s → %s (%s)\n", written.ClientName, result.URL, written.Path); err != nil {
+			if _, err := fmt.Fprintf(out, "Configured %s %q → %s (%s)\n", written.ClientName, result.Name, result.URL, written.Path); err != nil {
 				return err
 			}
 		}
 		if len(result.WrittenInfo) == 0 {
 			for _, path := range result.Written {
-				if _, err := fmt.Fprintf(out, "Configured %s (%s)\n", result.URL, path); err != nil {
+				if _, err := fmt.Fprintf(out, "Configured %q → %s (%s)\n", result.Name, result.URL, path); err != nil {
 					return err
 				}
 			}

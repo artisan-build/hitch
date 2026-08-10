@@ -6,17 +6,18 @@ credential carefully.
 > **Status: pre-release.** v0.0.1 is the first installable release path. It supports `curl | sh`
 > and `go install`; Homebrew and npm publishing are wired but waiting on publisher tokens.
 
-## What v0.0.1 Does
+## Current Release: v0.0.1
 
 Every MCP client stores server config in a different file, under a different key, with a different
 schema for the same server. `hitch` detects the harnesses you actually have, **asks which ones you
 want this server in**, and writes the correct config for each.
 
-- **Remote HTTP servers.**
+- **Remote HTTP servers** into the seven JSON-backed clients listed below.
 - **Credentials done properly** — never echoed, never printed, written atomically at `0600`, and a
   config that won't parse is reported rather than clobbered.
 - **Interactive and non-interactive installs** — choose detected harnesses, pass `--yes`, or target
   explicit clients with `--client`.
+- **Detection and version commands** with `hitch list` and `hitch version`.
 
 Important: v0.0.1 can install a credential into selected config files, but it does not have
 `hitch uninstall` or `hitch scan` yet. Keep track of what you install until those commands land.
@@ -52,6 +53,19 @@ Coming soon:
 - npm: the `hitch-mcp` shim package is configured, but publishing is skipped until `NPM_TOKEN` is
   configured.
 
+## On Main, Awaiting The Next Release
+
+The `main` branch now includes stdio server installs for the same seven JSON-backed clients:
+
+```sh
+hitch install stripe --command npx --args "-y,@stripe/mcp" --env STRIPE_API_KEY=sk_...
+```
+
+This is not in v0.0.1. Until the next release is tagged, `curl | sh` and
+`go install github.com/artisan-build/hitch@v0.0.1` install a binary without stdio support.
+
+Still planned: `hitch scan`, `hitch uninstall`, project-scoped installs, and Codex automatic setup.
+
 ## Remote MCP Install
 
 ```sh
@@ -68,8 +82,7 @@ go build ./...
 ```
 
 v0.0.1 exposes `hitch version`, `hitch list`, and remote HTTP `hitch install` for the seven
-JSON-backed clients above. Scan, uninstall, stdio servers, and Codex automatic setup are planned in
-later PRs.
+JSON-backed clients above.
 
 ## License
 

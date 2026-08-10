@@ -251,6 +251,53 @@ func TestInstallStdioMalformedConfigsAreRefusedAndUnchanged(t *testing.T) {
 	}
 }
 
+func TestInstallStdioEmptySanitizedNameErrorsAndWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := stdioOptions(testEnv(home), "cursor")
+	opts.Name = "!!!"
+	_, err := InstallStdio(opts)
+	if err == nil || !strings.Contains(err.Error(), "non-empty server name") {
+		t.Fatalf("InstallStdio error = %v, want non-empty server name", err)
+	}
+	if _, statErr := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid stdio name wrote config, stat err = %v", statErr)
+	}
+}
+
+func TestInstallStdioEmptyArgsAreOmittedForEveryClient(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range stdioShapeCases(t.TempDir()) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			opts := stdioOptions(testEnv(home), tt.id)
+			opts.Args = nil
+			_, err := InstallStdio(opts)
+			if err != nil {
+				t.Fatalf("InstallStdio returned error: %v", err)
+			}
+			server := readJSON(t, expectedPath(home, tt.id))[tt.key].(map[string]any)["renamed"].(map[string]any)
+			if tt.id == "opencode" {
+				command := server["command"].([]any)
+				if len(command) != 1 || command[0] != "npx" {
+					t.Fatalf("opencode command = %#v, want command only", command)
+				}
+				return
+			}
+			if _, ok := server["args"]; ok {
+				t.Fatalf("empty args key was written for %s stdio entry: %#v", tt.id, server)
+			}
+			if server["command"] != "npx" || server["env"] == nil {
+				t.Fatalf("stdio entry missing command or env positive controls: %#v", server)
+			}
+		})
+	}
+}
+
 func TestInstallStdioDryRunMasksEnvValuesAndWritesNothing(t *testing.T) {
 	t.Parallel()
 
@@ -269,25 +316,6 @@ func TestInstallStdioDryRunMasksEnvValuesAndWritesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(err) {
 		t.Fatalf("dry-run wrote config, stat err = %v", err)
-	}
-}
-
-func TestInstallStdioOmitsEmptyArgsForZedUntaggedSchema(t *testing.T) {
-	t.Parallel()
-
-	home := t.TempDir()
-	opts := stdioOptions(testEnv(home), "zed")
-	opts.Args = nil
-	_, err := InstallStdio(opts)
-	if err != nil {
-		t.Fatalf("InstallStdio returned error: %v", err)
-	}
-	server := readJSON(t, expectedPath(home, "zed"))["context_servers"].(map[string]any)["renamed"].(map[string]any)
-	if _, ok := server["args"]; ok {
-		t.Fatalf("empty args key was written for Zed stdio entry: %#v", server)
-	}
-	if server["command"] != "npx" || server["env"] == nil {
-		t.Fatalf("stdio entry missing command or env positive controls: %#v", server)
 	}
 }
 

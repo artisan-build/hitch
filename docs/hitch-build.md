@@ -49,29 +49,32 @@ token-store, affordance, or API-base code — none of it belongs here.
 
 ## 2. Command surface
 
+Implemented on main:
+
 ```
 hitch install <url> [token]              # remote HTTP; name inferred from host
-hitch install <name> --url <url>         # explicit name
 hitch install <name> --command <cmd> --args "a,b,c" [--env K=V ...]   # stdio
-hitch uninstall <name>
-hitch scan [<name>]                      # where is this server configured, and what holds a credential
 hitch list                               # which harnesses are installed on this machine
-hitch prompt <url>                       # copy-paste setup text for clients we cannot write
 hitch version
 ```
 
-### Global flags
+Planned commands: `hitch scan`, `hitch uninstall`, and prompt-tier setup flows.
+
+### Current `install` flags
 
 | Flag | Meaning |
 |---|---|
 | `-c, --client <name>` | Target explicit harnesses (repeatable). Skips the interactive picker. |
 | `-y, --yes` | Non-interactive: accept every detected harness. Skips the picker. |
-| `-p, --project` | Write to project-scoped config in the cwd instead of user-global. |
 | `--dry-run` | Print exactly which files would change and how; write nothing. |
 | `--token-stdin` | Read the token from stdin instead of argv. |
 | `--token-env <VAR>` | Read the token from an environment variable. |
 | `--header "K: V"` | Additional header (repeatable). For non-bearer auth schemes. |
 | `--name <name>` | Override the inferred server name. |
+| `--command <cmd>` | Select stdio mode and set the server command. |
+| `--args "a,b,c"` | Comma-separated stdio command arguments. Empty arguments are refused. |
+| `--env K=V` | Stdio environment variable (repeatable). Values are credentials and are never printed. |
+| `--forget` | Clear the remembered harness preference before installing. |
 
 ### Name inference
 

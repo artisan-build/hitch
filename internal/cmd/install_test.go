@@ -135,7 +135,7 @@ func TestInstallStdioCLIParsesArgsEnvAndMasksEnvOnDryRun(t *testing.T) {
 		home := t.TempDir()
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
-		args := []string{"install", "local-server", "--command", "npx", "--args", "-y,\"@scope/pkg,with-comma\",", "--env", "API_KEY=STDIO_CLI_SENTINEL_SECRET", "--client", "cursor"}
+		args := []string{"install", "local-server", "--command", "npx", "--args", "-y,\"@scope/pkg,with-comma\"", "--env", "API_KEY=STDIO_CLI_SENTINEL_SECRET", "--client", "cursor"}
 		if dryRun {
 			args = append(args, "--dry-run")
 		}
@@ -161,7 +161,7 @@ func TestInstallStdioCLIParsesArgsEnvAndMasksEnvOnDryRun(t *testing.T) {
 			t.Fatalf("stdio server basics = %#v", server)
 		}
 		gotArgs := server["args"].([]any)
-		wantArgs := []string{"-y", "@scope/pkg,with-comma", ""}
+		wantArgs := []string{"-y", "@scope/pkg,with-comma"}
 		if len(gotArgs) != len(wantArgs) {
 			t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
 		}
@@ -209,6 +209,18 @@ func TestInstallModeSelectionRejectsEmptyCommandAndIgnoredFlags(t *testing.T) {
 			args:     []string{"install", "stdio-name", "--command", "npx", "--name", "ignored", "--client", "cursor"},
 			wantCode: 2,
 			wantErr:  "--name is only valid for remote installs",
+		},
+		{
+			name:     "stdio rejects URL positional",
+			args:     []string{"install", "https://mcp.example.test/mcp", "--command", "npx", "--client", "cursor"},
+			wantCode: 2,
+			wantErr:  "server name, not a URL",
+		},
+		{
+			name:     "stdio rejects empty args entry",
+			args:     []string{"install", "stdio-name", "--command", "npx", "--args", "-y,", "--client", "cursor"},
+			wantCode: 2,
+			wantErr:  "empty arguments are not supported",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -405,7 +417,7 @@ func TestInstallURLCredentialGate(t *testing.T) {
 					t.Fatalf("url = %q, want %q", got, tt.wantURL)
 				}
 				if tt.url == "ballast.now/mcp" {
-					if !strings.Contains(stdout.String(), "Configured Cursor → https://ballast.now/mcp (") {
+					if !strings.Contains(stdout.String(), "Configured Cursor \"ballast\" → https://ballast.now/mcp (") {
 						t.Fatalf("stdout missing normalized URL success line: %q", stdout.String())
 					}
 					if strings.Contains(stdout.String(), "→ ballast.now/mcp") {
@@ -572,7 +584,7 @@ func TestInstallAutoDetectedCodexIsManualOnly(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); !os.IsNotExist(err) {
 		t.Fatalf("codex config was written, stat err = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "Configured Cursor → https://mcp.example.test/mcp ("+filepath.Join(home, ".cursor", "mcp.json")+")") || !strings.Contains(stdout.String(), "hitch cannot configure Codex automatically yet") {
+	if !strings.Contains(stdout.String(), "Configured Cursor \"example\" → https://mcp.example.test/mcp ("+filepath.Join(home, ".cursor", "mcp.json")+")") || !strings.Contains(stdout.String(), "hitch cannot configure Codex automatically yet") {
 		t.Fatalf("stdout missing configured cursor or Codex manual note: %q", stdout.String())
 	}
 }
@@ -717,7 +729,7 @@ func TestInstallPartialFailureContinuesAndSummarizesWrittenFiles(t *testing.T) {
 	if _, err := os.Stat(geminiPath); err != nil {
 		t.Fatalf("healthy harness was not written: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "Configured Gemini CLI → https://mcp.example.test/mcp ("+geminiPath+")") || !strings.Contains(stdout.String(), "Not configured: Cursor:") {
+	if !strings.Contains(stdout.String(), "Configured Gemini CLI \"example\" → https://mcp.example.test/mcp ("+geminiPath+")") || !strings.Contains(stdout.String(), "Not configured: Cursor:") {
 		t.Fatalf("summary missing written path or failure: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
