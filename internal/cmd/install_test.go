@@ -130,6 +130,101 @@ func TestInstallCLIHidesTokenOnSuccessAndDryRun(t *testing.T) {
 	}
 }
 
+func TestInstallStdioCLIParsesArgsEnvAndMasksEnvOnDryRun(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		home := t.TempDir()
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		args := []string{"install", "local-server", "--command", "npx", "--args", "-y,\"@scope/pkg,with-comma\",", "--env", "API_KEY=STDIO_CLI_SENTINEL_SECRET", "--client", "cursor"}
+		if dryRun {
+			args = append(args, "--dry-run")
+		}
+		code := Main(args, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+		if code != 0 {
+			t.Fatalf("dryRun=%v exit code = %d, stderr = %q", dryRun, code, stderr.String())
+		}
+		if strings.Contains(stdout.String()+stderr.String(), "STDIO_CLI_SENTINEL_SECRET") {
+			t.Fatalf("stdio env leaked; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		path := filepath.Join(home, ".cursor", "mcp.json")
+		if dryRun {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("dry-run wrote config, stat err = %v", err)
+			}
+			if !strings.Contains(stdout.String(), "\"API_KEY\": \"***\"") {
+				t.Fatalf("dry-run did not mask env value: %q", stdout.String())
+			}
+			continue
+		}
+		server := onlyCursorServer(t, home)
+		if server["type"] != "stdio" || server["command"] != "npx" {
+			t.Fatalf("stdio server basics = %#v", server)
+		}
+		gotArgs := server["args"].([]any)
+		wantArgs := []string{"-y", "@scope/pkg,with-comma", ""}
+		if len(gotArgs) != len(wantArgs) {
+			t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
+		}
+		for i, want := range wantArgs {
+			if gotArgs[i] != want {
+				t.Fatalf("arg %d = %q, want %q", i, gotArgs[i], want)
+			}
+		}
+		if server["env"].(map[string]any)["API_KEY"] != "STDIO_CLI_SENTINEL_SECRET" {
+			t.Fatalf("env not written correctly: %#v", server["env"])
+		}
+	}
+}
+
+func TestInstallStdioCLIErrorPathsDoNotEchoEnvValues(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "invalid env", args: []string{"install", "local-server", "--command", "npx", "--env", "STDIO_ERROR_SENTINEL_SECRET", "--client", "cursor"}},
+		{name: "malformed config", args: []string{"install", "local-server", "--command", "npx", "--env", "API_KEY=STDIO_ERROR_SENTINEL_SECRET", "--client", "cursor"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tt.name == "malformed config" {
+				writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{not-json", 0o600)
+			}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Main(tt.args, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+			if code == 0 {
+				t.Fatalf("exit code = 0, want failure")
+			}
+			if strings.Contains(stdout.String()+stderr.String(), "STDIO_ERROR_SENTINEL_SECRET") {
+				t.Fatalf("stdio error leaked env value; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestInstallStdioExplicitCodexPrintsManualInstructionsAndFails(t *testing.T) {
+	home := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "local-server", "--command", "npx", "--args", "-y,@example/mcp", "--env", "API_KEY=STDIO_CODEX_SENTINEL_SECRET", "--client", "codex"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("codex config was written, stat err = %v", err)
+	}
+	for _, want := range []string{"hitch cannot configure Codex automatically yet", "[mcp_servers.local-server]", "command = \"npx\"", "args = [\"-y\",\"@example/mcp\"]", "Set API_KEY"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q: %q", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "STDIO_CODEX_SENTINEL_SECRET") {
+		t.Fatalf("Codex stdio manual output leaked env value; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestInstallHeaderParsingDoesNotEchoSecret(t *testing.T) {
 	for _, tt := range []struct {
 		name         string

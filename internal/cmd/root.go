@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -103,11 +104,20 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	var headers []string
 	var name string
 	var forget bool
+	var command string
+	var argsCSV string
+	var envVars []string
 
 	cmd := &cobra.Command{
-		Use:   "install <url> [token]",
-		Short: "Install a remote HTTP MCP server into selected harnesses",
+		Use:   "install <url|name> [token]",
+		Short: "Install a remote HTTP or stdio MCP server into selected harnesses",
 		Args: func(_ *cobra.Command, args []string) error {
+			if command != "" {
+				if len(args) != 1 {
+					return exitError{err: fmt.Errorf("stdio install requires <name> with --command"), code: 2}
+				}
+				return nil
+			}
 			if len(args) < 1 || len(args) > 2 {
 				return exitError{err: fmt.Errorf("install requires <url> and optional [token]"), code: 2}
 			}
@@ -117,6 +127,52 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			env, err := envFn()
 			if err != nil {
 				return err
+			}
+			canonicalClients, err := normalizeClientIDs(clients)
+			if err != nil {
+				return exitError{err: err, code: 2}
+			}
+			if command != "" {
+				if len(headers) > 0 || tokenStdin || tokenEnv != "" {
+					return exitError{err: fmt.Errorf("stdio install cannot use --header, --token-stdin, or --token-env"), code: 2}
+				}
+				parsedArgs, err := parseArgsCSV(argsCSV)
+				if err != nil {
+					return exitError{err: err, code: 2}
+				}
+				parsedEnv, err := parseEnvVars(envVars)
+				if err != nil {
+					return exitError{err: err, code: 2}
+				}
+				result, err := install.InstallStdio(install.Options{
+					Name:     args[0],
+					Command:  command,
+					Args:     parsedArgs,
+					StdioEnv: parsedEnv,
+					Clients:  canonicalClients,
+					Yes:      yes,
+					DryRun:   dryRun,
+					Forget:   forget,
+					NonTTY:   !isTerminal(cmd.InOrStdin()),
+					PickTargets: func(targets []install.Target, preferred map[string]bool) ([]install.Target, error) {
+						return pickTargets(args[0], targets, preferred)
+					},
+					Env:    env,
+					Stdout: cmd.OutOrStdout(),
+				})
+				if summaryErr := printInstallSummary(cmd.OutOrStdout(), result, dryRun); summaryErr != nil {
+					return summaryErr
+				}
+				if err != nil {
+					if len(result.Failures) > 0 && (len(result.Written) > 0 || len(result.WouldWrite) > 0) {
+						return nil
+					}
+					if len(result.Failures) == 0 {
+						return err
+					}
+					return silentExitError{err: err, code: 1}
+				}
+				return nil
 			}
 			normalizedURL, err := install.NormalizeRemoteURL(args[0])
 			if err != nil {
@@ -138,10 +194,6 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			}
 			if normalizedURL, err = install.ValidateRemoteInstall(normalizedURL, parsedHeaders); err != nil {
 				return err
-			}
-			canonicalClients, err := normalizeClientIDs(clients)
-			if err != nil {
-				return exitError{err: err, code: 2}
 			}
 			result, err := install.InstallRemote(install.Options{
 				URL:     normalizedURL,
@@ -186,7 +238,40 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	cmd.Flags().StringArrayVar(&headers, "header", nil, "additional HTTP header as 'K: V' (repeatable)")
 	cmd.Flags().StringVar(&name, "name", "", "override the inferred server name")
 	cmd.Flags().BoolVar(&forget, "forget", false, "clear the remembered harness preference before installing")
+	cmd.Flags().StringVar(&command, "command", "", "stdio command to run")
+	cmd.Flags().StringVar(&argsCSV, "args", "", "comma-separated stdio command arguments")
+	cmd.Flags().StringArrayVar(&envVars, "env", nil, "stdio environment variable as K=V (repeatable)")
 	return cmd
+}
+
+func parseArgsCSV(value string) ([]string, error) {
+	if value == "" {
+		return nil, nil
+	}
+	reader := csv.NewReader(strings.NewReader(value))
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
+	args, err := reader.Read()
+	if err != nil {
+		return nil, fmt.Errorf("invalid --args CSV: %w", err)
+	}
+	if _, err := reader.Read(); err != io.EOF {
+		return nil, fmt.Errorf("invalid --args CSV: multiple records are not supported")
+	}
+	return args, nil
+}
+
+func parseEnvVars(values []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, value := range values {
+		key, val, ok := strings.Cut(value, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("invalid --env; use K=V")
+		}
+		out[key] = val
+	}
+	return out, nil
 }
 
 func resolveToken(cmd *cobra.Command, args []string, tokenStdin bool, tokenEnv string) (string, error) {
