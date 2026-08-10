@@ -87,6 +87,10 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			normalizedURL, err := install.NormalizeRemoteURL(args[0])
+			if err != nil {
+				return err
+			}
 			resolvedToken, err := resolveToken(cmd, args, tokenStdin, tokenEnv)
 			if err != nil {
 				return err
@@ -96,16 +100,21 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				return exitError{err: err, code: 2}
 			}
 			if resolvedToken != "" {
+				if _, ok := parsedHeaders["Authorization"]; ok {
+					return exitError{err: fmt.Errorf("authorization header cannot be combined with bearer token input"), code: 2}
+				}
 				parsedHeaders["Authorization"] = "Bearer " + resolvedToken
+			}
+			if normalizedURL, err = install.ValidateRemoteInstall(normalizedURL, parsedHeaders); err != nil {
+				return err
 			}
 			canonicalClients, err := normalizeClientIDs(clients)
 			if err != nil {
 				return exitError{err: err, code: 2}
 			}
 			result, err := install.InstallRemote(install.Options{
-				URL:     args[0],
+				URL:     normalizedURL,
 				Name:    name,
-				Token:   resolvedToken,
 				Headers: parsedHeaders,
 				Clients: canonicalClients,
 				Yes:     yes,
@@ -118,7 +127,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 					return ok, form.Run()
 				},
 				PickTargets: func(targets []install.Target, preferred map[string]bool) ([]install.Target, error) {
-					return pickTargets(args[0], targets, preferred)
+					return pickTargets(normalizedURL, targets, preferred)
 				},
 				Env:    env,
 				Stdout: cmd.OutOrStdout(),
@@ -127,7 +136,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				return summaryErr
 			}
 			if err != nil {
-				if len(result.Written) > 0 {
+				if len(result.Failures) > 0 && (len(result.Written) > 0 || len(result.WouldWrite) > 0) {
 					return nil
 				}
 				if len(result.Failures) == 0 {
@@ -151,17 +160,28 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 
 func resolveToken(cmd *cobra.Command, args []string, tokenStdin bool, tokenEnv string) (string, error) {
 	if len(args) == 2 {
+		if strings.TrimSpace(args[1]) == "" {
+			return "", fmt.Errorf("token argument is empty")
+		}
 		return args[1], nil
 	}
 	if tokenStdin {
 		raw, err := io.ReadAll(cmd.InOrStdin())
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("read token from stdin: %w", err)
 		}
-		return strings.TrimSpace(string(raw)), nil
+		value := strings.TrimSpace(string(raw))
+		if value == "" {
+			return "", fmt.Errorf("token read from stdin is empty")
+		}
+		return value, nil
 	}
 	if tokenEnv != "" {
-		return os.Getenv(tokenEnv), nil
+		value, ok := os.LookupEnv(tokenEnv)
+		if !ok || strings.TrimSpace(value) == "" {
+			return "", fmt.Errorf("environment variable %s is unset or empty", tokenEnv)
+		}
+		return value, nil
 	}
 	if isTerminal(cmd.InOrStdin()) {
 		if file, ok := cmd.InOrStdin().(*os.File); ok {
@@ -220,19 +240,30 @@ func pickTargets(url string, targets []install.Target, preferred map[string]bool
 	if len(targets) == 0 {
 		return nil, nil
 	}
-	selected := []string{}
+	selected := defaultSelectedTargetIDs(targets, preferred)
 	options := make([]huh.Option[string], 0, len(targets))
 	for _, target := range targets {
 		label := fmt.Sprintf("%s\t%s", target.Client.Name, target.Path)
 		options = append(options, huh.NewOption(label, target.Client.ID))
-		if preferred == nil || preferred[target.Client.ID] {
-			selected = append(selected, target.Client.ID)
-		}
 	}
 	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title(fmt.Sprintf("Install %q into which harnesses?", url)).Options(options...).Value(&selected)))
 	if err := form.Run(); err != nil {
 		return nil, err
 	}
+	return targetsBySelectedIDs(targets, selected), nil
+}
+
+func defaultSelectedTargetIDs(targets []install.Target, preferred map[string]bool) []string {
+	selected := []string{}
+	for _, target := range targets {
+		if preferred == nil || preferred[target.Client.ID] {
+			selected = append(selected, target.Client.ID)
+		}
+	}
+	return selected
+}
+
+func targetsBySelectedIDs(targets []install.Target, selected []string) []install.Target {
 	chosenIDs := map[string]bool{}
 	for _, id := range selected {
 		chosenIDs[id] = true
@@ -243,7 +274,7 @@ func pickTargets(url string, targets []install.Target, preferred map[string]bool
 			chosen = append(chosen, target)
 		}
 	}
-	return chosen, nil
+	return chosen
 }
 
 func printInstallSummary(out io.Writer, result install.Result, dryRun bool) error {

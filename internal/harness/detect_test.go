@@ -406,6 +406,72 @@ func TestVSCodeUserDataOverrides(t *testing.T) {
 	}
 }
 
+func TestVSCodeUserDataOverrideDetection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		setup    func(t *testing.T, home string) Env
+		wantPath func(home string) string
+	}{
+		{
+			name: "VSCODE_PORTABLE marker wins over VSCODE_APPDATA",
+			setup: func(t *testing.T, home string) Env {
+				t.Helper()
+				env := testEnv(home)
+				env.GOOS = "linux"
+				env.VSCodePortable = filepath.Join(home, "portable")
+				env.VSCodeAppData = filepath.Join(home, "vscode-appdata")
+				mkdir(t, filepath.Join(env.VSCodePortable, "user-data", "User"))
+				return env
+			},
+			wantPath: func(home string) string { return filepath.Join(home, "portable", "user-data", "User", "mcp.json") },
+		},
+		{
+			name: "VSCODE_APPDATA marker before platform default",
+			setup: func(t *testing.T, home string) Env {
+				t.Helper()
+				env := testEnv(home)
+				env.GOOS = "linux"
+				env.VSCodeAppData = filepath.Join(home, "vscode-appdata")
+				mkdir(t, filepath.Join(env.VSCodeAppData, "Code", "User"))
+				return env
+			},
+			wantPath: func(home string) string { return filepath.Join(home, "vscode-appdata", "Code", "User", "mcp.json") },
+		},
+		{
+			name: "override missing is not detected by platform default marker",
+			setup: func(t *testing.T, home string) Env {
+				t.Helper()
+				env := testEnv(home)
+				env.GOOS = "linux"
+				env.VSCodeAppData = filepath.Join(home, "missing-vscode-appdata")
+				mkdir(t, filepath.Join(env.XDGConfigHome, "Code", "User"))
+				return env
+			},
+			wantPath: func(home string) string {
+				return filepath.Join(home, "missing-vscode-appdata", "Code", "User", "mcp.json")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			env := tt.setup(t, home)
+			result := detectByID(t, env, "vscode")
+			wantDetected := !strings.Contains(tt.name, "missing")
+			if result.Detected != wantDetected {
+				t.Fatalf("VS Code detected = %v, want %v", result.Detected, wantDetected)
+			}
+			if result.ConfigPath != tt.wantPath(home) {
+				t.Fatalf("VS Code config path = %q, want %q", result.ConfigPath, tt.wantPath(home))
+			}
+		})
+	}
+}
+
 func TestZedDarwinIgnoresXDGConfigHome(t *testing.T) {
 	t.Parallel()
 

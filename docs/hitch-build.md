@@ -81,6 +81,24 @@ From the URL host: strip a leading `mcp.`, take the first remaining label.
 generic label (`api`, `www`, `app`, `server`), prompt for confirmation** rather than guessing.
 `--name` always wins. In `-y` mode an ambiguous inference is an error, not a guess.
 
+### URL and credential validation
+
+Remote install has a single pre-write validation gate. It runs after token/header resolution and before
+any config file is read for writing:
+
+- Scheme-less URLs normalize to `https://` instead of being rejected. `hitch install ballast.now/mcp
+  TOKEN` writes `https://ballast.now/mcp`; any user-facing confirmation or dry-run text must show the
+  normalized URL so the user sees exactly what will be written.
+- URL validation is local only: absolute `http` or `https` URL, non-empty host, no network probing or
+  `/.well-known` discovery.
+- If any credential/header is present, public `http://` is refused because it would transmit the
+  credential in cleartext. `http://localhost`, `http://127.0.0.1`, and `http://[::1]` are allowed for
+  local development. Refusal is the default; an insecure escape hatch may only be additive.
+- Explicit credential sources are required to resolve to a non-empty value. Empty positional token,
+  empty `--token-stdin`, and unset or empty `--token-env` all fail before any file is touched.
+- An explicit `Authorization` header and bearer token input are mutually exclusive. Hitch must not
+  silently overwrite one credential with another.
+
 ---
 
 ## 3. The interactive model (core UX, not a nicety)

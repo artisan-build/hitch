@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -178,19 +179,34 @@ func TestZedMalformedJSONMentionsJSONCComments(t *testing.T) {
 	}
 }
 
-func TestAtomicWriteImplementationUsesExclusiveTempAndRename(t *testing.T) {
-	t.Parallel()
-
-	raw, err := os.ReadFile("install.go")
-	if err != nil {
-		t.Fatalf("read install.go: %v", err)
-	}
-	source := string(raw)
-	for _, want := range []string{"os.O_EXCL", "os.Rename", "0o600"} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("writeAtomic source missing %s", want)
+func TestAtomicWriteFreshFileTempModeAndFinalMode(t *testing.T) {
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	observed := false
+	writeAtomicBeforeRename = func(tmpName string) error {
+		info, err := os.Stat(tmpName)
+		if err != nil {
+			return err
 		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("temp mode = %o, want 600", info.Mode().Perm())
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("fresh target existed before rename, stat err = %v", err)
+		}
+		observed = true
+		return nil
 	}
+	t.Cleanup(func() { writeAtomicBeforeRename = nil })
+
+	_, err := InstallRemote(baseOptions(testEnv(home), "cursor"))
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	if !observed {
+		t.Fatalf("temp file was not observed before rename")
+	}
+	assertMode0600(t, path)
 }
 
 func TestSymlinkedConfigUpdatesTargetAndKeepsLink(t *testing.T) {
@@ -314,6 +330,77 @@ func TestDryRunWritesNothingAndMasksToken(t *testing.T) {
 	}
 }
 
+func TestDryRunRefusesMalformedConfigAndLeavesItUnchanged(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	bad := "{not-json"
+	writeFile(t, path, bad, 0o600)
+	var out strings.Builder
+	opts := baseOptions(testEnv(home), "cursor")
+	opts.DryRun = true
+	opts.Stdout = &out
+	res, err := InstallRemote(opts)
+	if err == nil || len(res.Failures) != 1 {
+		t.Fatalf("InstallRemote err = %v failures = %#v, want refusal", err, res.Failures)
+	}
+	if strings.Contains(out.String(), "Would write") {
+		t.Fatalf("dry-run promised write for malformed config: %q", out.String())
+	}
+	if got := readFile(t, path); got != bad {
+		t.Fatalf("malformed config changed to %q", got)
+	}
+}
+
+func TestDryRunHealthyConfigWouldWriteAndLeavesItUnchanged(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	before := "{\n  \"mcpServers\": {}\n}\n"
+	writeFile(t, path, before, 0o600)
+	var out strings.Builder
+	opts := baseOptions(testEnv(home), "cursor")
+	opts.DryRun = true
+	opts.Stdout = &out
+	res, err := InstallRemote(opts)
+	if err != nil || len(res.WouldWrite) != 1 {
+		t.Fatalf("InstallRemote err = %v wouldWrite = %#v, want success", err, res.WouldWrite)
+	}
+	if !strings.Contains(out.String(), "Would write Cursor") {
+		t.Fatalf("dry-run missing would-write detail: %q", out.String())
+	}
+	if got := readFile(t, path); got != before {
+		t.Fatalf("dry-run changed config to %q", got)
+	}
+}
+
+func TestInteractiveDryRunLeavesWholeHomeUnchanged(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	env := testEnv(home)
+	makeMarker(t, home, "cursor")
+	before := snapshotTree(t, home)
+	var out strings.Builder
+	opts := baseOptions(env)
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.DryRun = true
+	opts.Stdout = &out
+	opts.PickTargets = func(targets []Target, preferred map[string]bool) ([]Target, error) { return targets, nil }
+	res, err := InstallRemote(opts)
+	if err != nil || len(res.WouldWrite) != 1 {
+		t.Fatalf("InstallRemote err = %v wouldWrite = %#v", err, res.WouldWrite)
+	}
+	after := snapshotTree(t, home)
+	if before != after {
+		t.Fatalf("interactive dry-run changed HOME\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
 func TestDryRunMasksCustomHeaderValues(t *testing.T) {
 	t.Parallel()
 
@@ -370,6 +457,95 @@ func TestPreferencesRejectRelativeXDGConfigHome(t *testing.T) {
 	}
 }
 
+func TestCorruptPreferencesAreIgnoredForInteractiveInstall(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	env := testEnv(home)
+	makeMarker(t, home, "cursor")
+	writeFile(t, filepath.Join(home, ".config", "hitch", "preferences.json"), "{broken", 0o600)
+	opts := baseOptions(env)
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.PickTargets = func(targets []Target, preferred map[string]bool) ([]Target, error) {
+		if preferred != nil {
+			t.Fatalf("preferred = %#v, want nil after corrupt preferences", preferred)
+		}
+		return targets, nil
+	}
+	_, err := InstallRemote(opts)
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+}
+
+func TestInteractiveSavePreferencesFailureIsReturned(t *testing.T) {
+	home := t.TempDir()
+	env := testEnv(home)
+	makeMarker(t, home, "cursor")
+	writeAtomicBeforeRename = func(tmpName string) error {
+		if strings.Contains(tmpName, "preferences.json") {
+			return os.ErrPermission
+		}
+		return nil
+	}
+	t.Cleanup(func() { writeAtomicBeforeRename = nil })
+	opts := baseOptions(env)
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.PickTargets = func(targets []Target, preferred map[string]bool) ([]Target, error) { return targets, nil }
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want SavePreferences failure")
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("written = %#v, want cursor write before preference failure", res.Written)
+	}
+}
+
+func TestDuplicateTopLevelConfigKeyRefusedAndUnchanged(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	raw := "{\n  \"mcpServers\": {},\n  \"mcpServers\": {}\n}\n"
+	writeFile(t, path, raw, 0o600)
+	_, err := InstallRemote(baseOptions(testEnv(home), "cursor"))
+	if err == nil || !strings.Contains(err.Error(), "duplicate top-level key") {
+		t.Fatalf("InstallRemote error = %v, want duplicate key", err)
+	}
+	if got := readFile(t, path); got != raw {
+		t.Fatalf("duplicate-key config changed to %q", got)
+	}
+}
+
+func TestDanglingSymlinkConfigIsRefused(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	missingTarget := filepath.Join(home, "missing.json")
+	if err := os.Symlink(missingTarget, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err := InstallRemote(baseOptions(testEnv(home), "cursor"))
+	if err == nil || !strings.Contains(err.Error(), "dangling symlink") {
+		t.Fatalf("InstallRemote error = %v, want dangling symlink", err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dangling symlink was replaced")
+	}
+}
+
 func TestInteractiveInstallPropagatesRelativePreferencePathError(t *testing.T) {
 	t.Parallel()
 
@@ -401,6 +577,46 @@ func baseOptions(env harness.Env, clientIDs ...string) Options {
 		NonTTY:  true,
 		Env:     env,
 	}
+}
+
+func snapshotTree(t *testing.T, root string) string {
+	t.Helper()
+	entries := []string{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			entries = append(entries, rel+"/")
+			return nil
+		}
+		body := ""
+		if info.Mode().IsRegular() {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			body = string(raw)
+		}
+		entries = append(entries, rel+" "+info.Mode().String()+" "+body)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %q: %v", root, err)
+	}
+	sort.Strings(entries)
+	return strings.Join(entries, "\n")
 }
 
 func shapeCases(home string) []shapeCase {

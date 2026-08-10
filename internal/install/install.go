@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,7 +36,6 @@ type Target struct {
 type Options struct {
 	URL         string
 	Name        string
-	Token       string
 	Headers     map[string]string
 	Clients     []string
 	Yes         bool
@@ -154,6 +154,11 @@ func ResolveName(rawURL string, explicit string, yes bool, confirm func(string) 
 }
 
 func InstallRemote(opts Options) (Result, error) {
+	normalizedURL, err := ValidateRemoteInstall(opts.URL, opts.Headers)
+	if err != nil {
+		return Result{}, err
+	}
+	opts.URL = normalizedURL
 	if opts.Name == "" {
 		name, ambiguous, err := InferName(opts.URL)
 		if err != nil {
@@ -198,6 +203,10 @@ func InstallRemote(opts Options) (Result, error) {
 		}
 		entry := adapter.BuildEntry(opts.URL, opts.Headers, res.CodexEnvVar)
 		if opts.DryRun {
+			if err := ValidateEntry(target.Path, adapter, name, entry); err != nil {
+				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+				continue
+			}
 			res.WouldWrite = append(res.WouldWrite, target.Path)
 			if opts.Stdout != nil {
 				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, target.Path, MaskedJSON(entry))
@@ -223,6 +232,42 @@ func InstallRemote(opts Options) (Result, error) {
 		return res, fmt.Errorf("some harnesses were not configured: %s", strings.Join(res.Failures, "; "))
 	}
 	return res, nil
+}
+
+func ValidateRemoteInstall(rawURL string, headers map[string]string) (string, error) {
+	normalizedURL, parsed, err := normalizeRemoteURL(rawURL)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" {
+		return "", fmt.Errorf("install URL must be absolute with http or https scheme and non-empty host")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("install URL must use http or https scheme")
+	}
+	if parsed.Scheme == "http" && len(headers) > 0 && !isLocalhost(parsed.Hostname()) {
+		return "", fmt.Errorf("refusing to send credentials over insecure http URL; use https or localhost")
+	}
+	return normalizedURL, nil
+}
+
+func NormalizeRemoteURL(rawURL string) (string, error) {
+	normalizedURL, _, err := normalizeRemoteURL(rawURL)
+	return normalizedURL, err
+}
+
+func normalizeRemoteURL(rawURL string) (string, *url.URL, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if !strings.Contains(trimmed, "://") {
+		trimmed = "https://" + trimmed
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", nil, err
+	}
+	return parsed.String(), parsed, nil
+}
+
+func isLocalhost(host string) bool {
+	host = strings.Trim(strings.ToLower(host), "[]")
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func codexManualInstructions(name string, url string, envVar string) string {
@@ -307,20 +352,28 @@ func sanitizeName(name string) string {
 }
 
 func WriteEntry(path string, adapter Adapter, name string, entry map[string]any) error {
-	return writeJSONEntry(path, adapter.ConfigKey, adapter.ClientID == "zed", name, entry)
-}
-
-func writeJSONEntry(path string, key string, zedHint bool, name string, entry map[string]any) error {
-	raw, existed, err := readExisting(path)
+	content, err := buildJSONEntry(path, adapter.ConfigKey, adapter.ClientID == "zed", name, entry)
 	if err != nil {
 		return err
 	}
+	return writeAtomic(path, content)
+}
+
+func ValidateEntry(path string, adapter Adapter, name string, entry map[string]any) error {
+	_, err := buildJSONEntry(path, adapter.ConfigKey, adapter.ClientID == "zed", name, entry)
+	return err
+}
+
+func buildJSONEntry(path string, key string, zedHint bool, name string, entry map[string]any) ([]byte, error) {
+	raw, existed, err := readExisting(path)
+	if err != nil {
+		return nil, err
+	}
 	if !existed || len(bytes.TrimSpace(raw)) == 0 {
-		content, err := jsonConfigWithEntry(key, name, entry)
-		if err != nil {
-			return err
-		}
-		return writeAtomic(path, content)
+		return jsonConfigWithEntry(key, name, entry)
+	}
+	if err := rejectDuplicateTopLevelKeys(raw, path); err != nil {
+		return nil, err
 	}
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
@@ -328,22 +381,54 @@ func writeJSONEntry(path string, key string, zedHint bool, name string, entry ma
 		if zedHint {
 			hint = " Zed settings may contain JSONC comments; remove comments before retrying."
 		}
-		return fmt.Errorf("existing config %s is not valid JSON (%v); fix or remove it, then retry.%s", path, err, hint)
+		return nil, fmt.Errorf("existing config %s is not valid JSON (%v); fix or remove it, then retry.%s", path, err, hint)
 	}
 	object, ok := decoded.(map[string]any)
 	if !ok {
-		return fmt.Errorf("existing config %s is not a JSON object", path)
+		return nil, fmt.Errorf("existing config %s is not a JSON object", path)
 	}
 	if servers, ok := object[key]; ok {
 		if _, ok := servers.(map[string]any); !ok {
-			return fmt.Errorf("existing config %s has non-object %q", path, key)
+			return nil, fmt.Errorf("existing config %s has non-object %q", path, key)
 		}
 	}
 	updated, err := setJSONObjectEntry(raw, key, name, entry)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return writeAtomic(path, updated)
+	return updated, nil
+}
+
+func rejectDuplicateTopLevelKeys(raw []byte, path string) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return nil
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil
+		}
+		if seen[key] {
+			return fmt.Errorf("existing config %s has duplicate top-level key %q", path, key)
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil
+		}
+	}
+	return nil
 }
 
 func jsonConfigWithEntry(key string, name string, entry map[string]any) ([]byte, error) {
@@ -608,6 +693,9 @@ func readExisting(path string) ([]byte, bool, error) {
 		return raw, true, nil
 	}
 	if os.IsNotExist(err) {
+		if info, lstatErr := os.Lstat(path); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return nil, false, fmt.Errorf("config path %s is a dangling symlink; fix or remove it, then retry", path)
+		}
 		return nil, false, nil
 	}
 	return nil, false, fmt.Errorf("could not read %s: %w", path, err)
@@ -639,11 +727,18 @@ func writeAtomic(path string, content []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if writeAtomicBeforeRename != nil {
+		if err := writeAtomicBeforeRename(tmpName); err != nil {
+			return err
+		}
+	}
 	if err := os.Rename(tmpName, target); err != nil {
 		return err
 	}
 	return os.Chmod(target, 0o600)
 }
+
+var writeAtomicBeforeRename func(string) error
 
 func MaskedJSON(entry map[string]any) string {
 	masked := maskValue(entry).(map[string]any)
@@ -708,7 +803,7 @@ func LoadPreferences(env harness.Env) (map[string]bool, error) {
 		Clients []string `json:"clients"`
 	}
 	if err := json.Unmarshal(raw, &pref); err != nil {
-		return nil, err
+		return nil, nil
 	}
 	out := map[string]bool{}
 	for _, id := range pref.Clients {
