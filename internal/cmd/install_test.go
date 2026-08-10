@@ -96,8 +96,10 @@ func TestInstallHeaderParseErrorDoesNotEchoSecret(t *testing.T) {
 		secret     string
 		wantDetail string
 	}{
-		{name: "missing colon", header: "X-Api-Key SUPERSECRET_NO_COLON", secret: "SUPERSECRET_NO_COLON", wantDetail: "X-Api-Key"},
-		{name: "empty key", header: ":SUPERSECRET_EMPTY_KEY", secret: "SUPERSECRET_EMPTY_KEY", wantDetail: "invalid --header; use 'K: V'"},
+		{name: "empty key", header: ":SENTINEL_EMPTY_KEY", secret: "SENTINEL_EMPTY_KEY", wantDetail: "invalid --header; use 'K: V'"},
+		{name: "whitespace empty key", header: "  :SENTINEL_WHITESPACE_EMPTY_KEY", secret: "SENTINEL_WHITESPACE_EMPTY_KEY", wantDetail: "invalid --header; use 'K: V'"},
+		{name: "missing colon with key", header: "X-Api-Key SENTINEL_MISSING_COLON", secret: "SENTINEL_MISSING_COLON", wantDetail: "X-Api-Key"},
+		{name: "bare no delimiter", header: "SENTINEL_BARE_NO_DELIMITER", secret: "SENTINEL_BARE_NO_DELIMITER", wantDetail: "invalid --header; use 'K: V'"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -142,8 +144,8 @@ func TestInstallExplicitCodexPrintsManualInstructionsAndFails(t *testing.T) {
 	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok_SENTINEL_codex", "--client", "codex"}, &stdout, &stderr, func() (harness.Env, error) {
 		return testEnv(home), nil
 	})
-	if code == 0 {
-		t.Fatalf("exit code = 0, want non-zero")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
 	}
 	if strings.Contains(stdout.String(), "Codex uses an environment variable") {
 		t.Fatalf("stdout printed false Codex note: %q", stdout.String())
@@ -191,7 +193,7 @@ func TestInstallNameOverrideWins(t *testing.T) {
 		return testEnv(home), nil
 	})
 	if code != 0 {
-		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
 	}
 	servers := cursorServers(t, home)
 	if servers["override-name"] == nil || servers["example"] != nil {
@@ -244,8 +246,8 @@ func TestInstallAutoDetectedCodexOnlyPrintsManualInstructions(t *testing.T) {
 	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--yes"}, &stdout, &stderr, func() (harness.Env, error) {
 		return testEnv(home), nil
 	})
-	if code == 0 {
-		t.Fatalf("exit code = 0, want non-zero")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
 	}
 	if !strings.Contains(stdout.String(), "hitch cannot configure Codex automatically yet") || !strings.Contains(stdout.String(), "export HITCH_TOKEN_EXAMPLE=YOUR_TOKEN") {
 		t.Fatalf("stdout missing Codex manual note: %q", stdout.String())
@@ -312,8 +314,8 @@ func TestInstallPartialFailureContinuesAndSummarizesWrittenFiles(t *testing.T) {
 	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--client", "cursor", "--client", "gemini"}, &stdout, &stderr, func() (harness.Env, error) {
 		return testEnv(home), nil
 	})
-	if code == 0 {
-		t.Fatalf("exit code = 0, want non-zero")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
 	}
 	geminiPath := filepath.Join(home, ".gemini", "settings.json")
 	if _, err := os.Stat(geminiPath); err != nil {
@@ -321,6 +323,19 @@ func TestInstallPartialFailureContinuesAndSummarizesWrittenFiles(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Configured "+geminiPath) || !strings.Contains(stdout.String(), "Not configured: Cursor:") {
 		t.Fatalf("summary missing written path or failure: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestInstallExitCodeIsOneWhenNoHarnessConfigured(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{not-json", 0o600)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--client", "cursor"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
 	}
 }
 

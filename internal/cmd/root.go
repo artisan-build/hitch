@@ -127,6 +127,9 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				return summaryErr
 			}
 			if err != nil {
+				if len(result.Written) > 0 {
+					return nil
+				}
 				if len(result.Failures) == 0 {
 					return err
 				}
@@ -182,8 +185,7 @@ func parseHeaders(values []string) (map[string]string, error) {
 			return nil, fmt.Errorf("invalid --header; use 'K: V'")
 		}
 		if !ok {
-			candidate := strings.Fields(value)
-			if len(candidate) > 0 && strings.TrimSpace(candidate[0]) != "" {
+			if candidate := strings.Fields(value); len(candidate) > 1 && strings.TrimSpace(candidate[0]) != "" {
 				return nil, fmt.Errorf("invalid --header for key %q; use 'K: V'", candidate[0])
 			}
 			return nil, fmt.Errorf("invalid --header; use 'K: V'")
