@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,28 @@ func TestVersionCommand(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("version output %q does not contain %q", got, want)
 		}
+	}
+}
+
+func TestVersionInfoFallsBackToGoInstallModuleVersion(t *testing.T) {
+	info := &debug.BuildInfo{
+		Main: debug.Module{Version: "v0.0.1"},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "abcdef123456"},
+			{Key: "vcs.time", Value: "2026-08-10T00:00:00Z"},
+		},
+	}
+
+	version, commit, date := versionInfoFromBuildInfo("dev", "none", "unknown", info)
+
+	if version != "v0.0.1" {
+		t.Fatalf("version = %q, want v0.0.1", version)
+	}
+	if commit != "abcdef123456" {
+		t.Fatalf("commit = %q, want abcdef123456", commit)
+	}
+	if date != "2026-08-10T00:00:00Z" {
+		t.Fatalf("date = %q, want 2026-08-10T00:00:00Z", date)
 	}
 }
 

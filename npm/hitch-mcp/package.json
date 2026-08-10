@@ -1,0 +1,22 @@
+{
+  "name": "hitch-mcp",
+  "version": "0.0.1",
+  "description": "npx shim for installing MCP servers with hitch",
+  "bin": {
+    "hitch-mcp": "bin/hitch-mcp.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artisan-build/hitch.git"
+  },
+  "dependencies": {
+    "tar": "^7.4.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
