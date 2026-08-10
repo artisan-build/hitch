@@ -1,0 +1,32 @@
+# Scrubbed Codex config fixture.
+# Values are placeholders; structure mirrors a real-world config shape.
+profile = "placeholder-profile"
+approval_policy = "on-request"
+# Keep both offsets: they catch any future reserialization that normalizes datetimes.
+created_at = 2026-01-02T03:04:05+12:45
+updated_at = 2026-02-03T04:05:06-03:30
+
+[projects."/placeholder/project-alpha"]
+trust_level = "trusted"
+
+[projects."/placeholder/project-beta"]
+trust_level = "untrusted"
+
+# Existing remote server with a nested environment table.
+[mcp_servers.node_repl]
+url = "https://placeholder-node-repl.invalid/mcp"
+bearer_token_env_var = "PLACEHOLDER_NODE_REPL_TOKEN"
+
+[mcp_servers.node_repl.env]
+NODE_ENV = "placeholder"
+WORKSPACE_ROOT = "/placeholder/workspace"
+
+# A dashed server name must stay quoted and survive unrelated removals.
+[mcp_servers."computer-use"]
+url = "https://placeholder-computer-use.invalid/mcp"
+bearer_token_env_var = "PLACEHOLDER_COMPUTER_USE_TOKEN"
+
+# This comment intentionally sits immediately above the following table header.
+[mcp_servers.placeholder_keep]
+url = "https://placeholder-keep.invalid/mcp"
+bearer_token_env_var = "PLACEHOLDER_KEEP_TOKEN"

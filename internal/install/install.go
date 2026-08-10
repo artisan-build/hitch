@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/artisan-build/hitch/internal/harness"
+	"github.com/pelletier/go-toml/v2/unstable"
 )
 
 const codexTokenPrefix = "HITCH_TOKEN_"
@@ -205,7 +207,11 @@ func ScanScoped(env harness.Env, name string, clientIDs []string, project bool) 
 				if len(selected) > 0 && !selected[detected.ID] {
 					continue
 				}
-				out = append(out, scanCodex(detected))
+				if name == "" {
+					out = append(out, scanCodex(detected))
+				} else {
+					out = append(out, scanCodexName(detected, name))
+				}
 			}
 			continue
 		}
@@ -216,6 +222,9 @@ func ScanScoped(env harness.Env, name string, clientIDs []string, project bool) 
 	}
 	if len(selected) > 0 && len(out) != len(selected) {
 		for id := range selected {
+			if id == "codex" {
+				continue
+			}
 			if _, ok := AdapterByClientID(id); !ok {
 				return nil, fmt.Errorf("unknown file-writer client %q", id)
 			}
@@ -259,8 +268,40 @@ func scanCodex(client harness.DetectionResult) ScanResult {
 	if !existed || len(bytes.TrimSpace(raw)) == 0 {
 		return result
 	}
-	result.Status = ScanUnreadable
-	result.Detail = "hitch cannot configure Codex automatically yet; cannot verify or remove Codex config"
+	entry, err := findCodexServer(raw, client.ConfigPath, "")
+	if err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	if entry.found {
+		result.Status = ScanHasEntry
+		result.HoldsCredential = entry.holdsCredential
+	}
+	return result
+}
+
+func scanCodexName(client harness.DetectionResult, name string) ScanResult {
+	result := ScanResult{Client: client, Path: client.ConfigPath, Status: ScanNoEntry}
+	raw, existed, err := readExisting(client.ConfigPath)
+	if err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	if !existed || len(bytes.TrimSpace(raw)) == 0 {
+		return result
+	}
+	entry, err := findCodexServer(raw, client.ConfigPath, name)
+	if err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	if entry.found {
+		result.Status = ScanHasEntry
+		result.HoldsCredential = entry.holdsCredential
+	}
 	return result
 }
 
@@ -378,7 +419,22 @@ func Uninstall(opts UninstallOptions) (UninstallResult, error) {
 	for _, target := range selected {
 		adapter, ok := AdapterByClientID(target.Client.ID)
 		if !ok {
-			return res, fmt.Errorf("unknown file-writer client %q", target.Client.ID)
+			if target.Client.ID != "codex" {
+				return res, fmt.Errorf("unknown file-writer client %q", target.Client.ID)
+			}
+			changed, err := RemoveCodexEntry(target.Path, name)
+			if err != nil {
+				target.Status = ScanUnreadable
+				target.Detail = err.Error()
+				res.Unreadable = append(res.Unreadable, target)
+				continue
+			}
+			if changed {
+				res.Removed = append(res.Removed, target)
+			} else {
+				res.NotPresent = append(res.NotPresent, target)
+			}
+			continue
 		}
 		changed, err := RemoveEntry(target.Path, adapter, name)
 		if err != nil {
@@ -666,12 +722,12 @@ func isLocalhost(host string) bool {
 }
 
 func codexManualInstructions(name string, url string, envVar string) string {
-	return fmt.Sprintf("hitch cannot configure Codex automatically yet. Add this to Codex config manually:\n[mcp_servers.%s]\nurl = %q\nbearer_token_env_var = %q\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN", name, url, envVar, envVar)
+	return fmt.Sprintf("hitch cannot configure Codex automatically yet. Add this to Codex config manually; hitch scan and uninstall can verify or remove it later:\n[%s]\nurl = %q\nbearer_token_env_var = %q\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN", codexServerTableHeader(name), url, envVar, envVar)
 }
 
 func codexStdioManualInstructions(name string, command string, args []string, env map[string]string) string {
 	var b strings.Builder
-	_, _ = fmt.Fprintf(&b, "hitch cannot configure Codex automatically yet. Add this to Codex config manually:\n[mcp_servers.%s]\ncommand = %q\n", name, command)
+	_, _ = fmt.Fprintf(&b, "hitch cannot configure Codex automatically yet. Add this to Codex config manually; hitch scan and uninstall can verify or remove it later:\n[%s]\ncommand = %q\n", codexServerTableHeader(name), command)
 	if len(args) > 0 {
 		encoded, _ := json.Marshal(args)
 		_, _ = fmt.Fprintf(&b, "args = %s\n", encoded)
@@ -680,6 +736,21 @@ func codexStdioManualInstructions(name string, command string, args []string, en
 		_, _ = fmt.Fprintf(&b, "# Set %s in the Codex server environment.\n", key)
 	}
 	return b.String()
+}
+
+func codexServerTableHeader(name string) string {
+	return "mcp_servers." + tomlKeySegment(name)
+}
+
+func CodexServerTableHeader(name string) string {
+	return codexServerTableHeader(name)
+}
+
+func tomlKeySegment(key string) string {
+	if regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(key) {
+		return key
+	}
+	return strconv.Quote(key)
 }
 
 func resolveTargets(opts Options) ([]Target, bool, error) {
@@ -918,8 +989,8 @@ func CodexTokenEnvVar(name string) string {
 
 func sanitizeName(name string) string {
 	name = strings.TrimSpace(strings.ToLower(name))
-	name = regexp.MustCompile(`[^a-z0-9_-]+`).ReplaceAllString(name, "-")
-	name = strings.Trim(name, "-_")
+	name = regexp.MustCompile(`[^a-z0-9_.-]+`).ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-_.")
 	return name
 }
 
@@ -1055,6 +1126,417 @@ func setJSONObjectEntry(raw []byte, key string, name string, entry map[string]an
 	return insertIntoObject(raw, keyRange.start, keyRange.end, name, serverObject)
 }
 
+type codexServerEntry struct {
+	found           bool
+	holdsCredential bool
+	rangeToRemove   byteRange
+}
+
+// codexExpression is one entry in the parser's ordered top-level expression
+// stream. anchor is the offset of the expression's first parser-reported token
+// (the raw range for key-values and comments, the first header key for
+// tables); lineEnd is the offset just past the expression's line terminator
+// (len of the document at EOF). Both are derived from parser ranges plus the
+// grammar's guarantee about what may sit between them on the same line;
+// nothing is located by scanning the document backwards.
+type codexExpression struct {
+	kind            unstable.Kind
+	path            []string
+	anchor          int
+	lineEnd         int
+	holdsCredential bool
+}
+
+func RemoveCodexEntry(path string, name string) (bool, error) {
+	content, changed, err := buildCodexRemoval(path, name)
+	if err != nil || !changed {
+		return changed, err
+	}
+	return true, writeAtomic(path, content)
+}
+
+func buildCodexRemoval(path string, name string) ([]byte, bool, error) {
+	raw, existed, err := readExisting(path)
+	if err != nil || !existed || len(bytes.TrimSpace(raw)) == 0 {
+		return nil, false, err
+	}
+	entry, err := findCodexServer(raw, path, name)
+	if err != nil || !entry.found {
+		return nil, false, err
+	}
+	return replaceRange(raw, entry.rangeToRemove.start, entry.rangeToRemove.end, nil), true, nil
+}
+
+func findCodexServer(raw []byte, path string, name string) (codexServerEntry, error) {
+	expressions, err := parseCodexExpressions(raw, path)
+	if err != nil {
+		return codexServerEntry{}, err
+	}
+	if err := validateCodexMCPServerShapes(path, expressions); err != nil {
+		return codexServerEntry{}, err
+	}
+	var found []int
+	serverHasCredential := map[string]bool{}
+	for i, expr := range expressions {
+		if len(expr.path) < 2 || expr.path[0] != "mcp_servers" {
+			continue
+		}
+		serverName := expr.path[1]
+		if expr.holdsCredential {
+			serverHasCredential[serverName] = true
+		}
+		if name == "" || serverName == name {
+			if isCodexServerRoot(expr) {
+				found = append(found, i)
+			}
+		}
+	}
+	if len(found) == 0 {
+		return codexServerEntry{}, nil
+	}
+	if name == "" {
+		return codexServerEntry{found: true, holdsCredential: serverHasCredential[expressions[found[0]].path[1]]}, nil
+	}
+	if len(found) > 1 {
+		return codexServerEntry{}, fmt.Errorf("existing Codex config %s has multiple mcp_servers entries named %q; cannot verify", path, name)
+	}
+	root := expressions[found[0]]
+	entry := codexServerEntry{found: true, holdsCredential: serverHasCredential[name] || root.holdsCredential}
+	span, err := codexRemovalExtent(raw, expressions, found[0], path)
+	if err != nil {
+		return codexServerEntry{}, err
+	}
+	entry.rangeToRemove = span
+	return entry, nil
+}
+
+func parseCodexExpressions(raw []byte, path string) ([]codexExpression, error) {
+	parser := unstable.Parser{KeepComments: true}
+	parser.Reset(raw)
+	currentTable := []string{}
+	expressions := []codexExpression{}
+	for parser.NextExpression() {
+		node := parser.Expression()
+		expr := codexExpression{kind: node.Kind}
+		switch node.Kind {
+		case unstable.Table, unstable.ArrayTable:
+			keyPath, firstKeyOffset, err := tomlKeyPath(node)
+			if err != nil {
+				return nil, err
+			}
+			currentTable = append([]string{}, keyPath...)
+			expr.path = keyPath
+			expr.anchor = firstKeyOffset
+		case unstable.KeyValue:
+			keyPath, _, err := tomlKeyPath(node)
+			if err != nil {
+				return nil, err
+			}
+			if len(currentTable) > 0 {
+				keyPath = append(append([]string{}, currentTable...), keyPath...)
+			}
+			expr.path = keyPath
+			expr.anchor = int(node.Raw.Offset)
+			expr.holdsCredential = codexNodeHoldsCredential(keyPath, node)
+		case unstable.Comment:
+			expr.anchor = int(node.Raw.Offset)
+		default:
+			return nil, fmt.Errorf("existing Codex config %s has an unsupported TOML expression; cannot verify", path)
+		}
+		lineEnd, err := tomlExpressionLineEnd(raw, node)
+		if err != nil {
+			return nil, fmt.Errorf("existing Codex config %s has unreadable TOML expression range: %w", path, err)
+		}
+		expr.lineEnd = lineEnd
+		expressions = append(expressions, expr)
+	}
+	if err := parser.Error(); err != nil {
+		return nil, fmt.Errorf("existing Codex config %s is not valid TOML: %w", path, err)
+	}
+	return expressions, nil
+}
+
+func validateCodexMCPServerShapes(path string, expressions []codexExpression) error {
+	roots := map[string]bool{}
+	for _, expr := range expressions {
+		if isCodexServerRoot(expr) {
+			if roots[expr.path[1]] {
+				return fmt.Errorf("existing Codex config %s has multiple mcp_servers entries named %q; cannot verify", path, expr.path[1])
+			}
+			roots[expr.path[1]] = true
+		}
+	}
+	for _, expr := range expressions {
+		if len(expr.path) == 0 || expr.path[0] != "mcp_servers" {
+			continue
+		}
+		if len(expr.path) == 1 {
+			if expr.kind == unstable.Table {
+				continue
+			}
+			return fmt.Errorf("existing Codex config %s has unrecognized mcp_servers TOML shape; cannot verify or remove", path)
+		}
+		if expr.kind == unstable.ArrayTable {
+			return fmt.Errorf("existing Codex config %s has unrecognized mcp_servers TOML shape; cannot verify or remove", path)
+		}
+		if isCodexServerRoot(expr) {
+			continue
+		}
+		if len(expr.path) > 2 && roots[expr.path[1]] {
+			continue
+		}
+		return fmt.Errorf("existing Codex config %s has unrecognized mcp_servers TOML shape; cannot verify or remove", path)
+	}
+	return nil
+}
+
+func tomlKeyPath(node *unstable.Node) ([]string, int, error) {
+	keys := []string{}
+	firstOffset := -1
+	for it := node.Key(); it.Next(); {
+		keyNode := it.Node()
+		if keyNode.Kind != unstable.Key {
+			return nil, 0, errors.New("TOML key path contains a non-key node")
+		}
+		if firstOffset < 0 {
+			firstOffset = int(keyNode.Raw.Offset)
+		}
+		keys = append(keys, string(keyNode.Data))
+	}
+	if len(keys) == 0 || firstOffset < 0 {
+		return nil, 0, errors.New("TOML expression has no key path")
+	}
+	return keys, firstOffset, nil
+}
+
+// tomlExpressionLineEnd returns the offset just past the expression's line
+// terminator, or len(raw) at EOF. It starts from the end of the expression's
+// last parser-reported token and consumes forward only what the grammar
+// allows on the rest of that line: the closing header bracket(s) implied by
+// the node kind, whitespace, and a trailing comment the parser already
+// attached as the expression's sibling node.
+func tomlExpressionLineEnd(raw []byte, node *unstable.Node) (int, error) {
+	pos := int(node.Raw.Offset + node.Raw.Length)
+	if node.Kind == unstable.Table || node.Kind == unstable.ArrayTable {
+		lastKeyEnd, err := tomlLastKeyEnd(node)
+		if err != nil {
+			return 0, err
+		}
+		pos, err = tomlConsumeHeaderClose(raw, lastKeyEnd, node.Kind)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if trailing := node.Next(); trailing != nil && trailing.Kind == unstable.Comment {
+		pos = int(trailing.Raw.Offset + trailing.Raw.Length)
+	}
+	pos = tomlSkipInlineSpace(raw, pos)
+	switch {
+	case pos == len(raw):
+		return pos, nil
+	case raw[pos] == '\n':
+		return pos + 1, nil
+	case raw[pos] == '\r' && pos+1 < len(raw) && raw[pos+1] == '\n':
+		return pos + 2, nil
+	}
+	return 0, errors.New("TOML expression is not followed by an end of line")
+}
+
+func tomlLastKeyEnd(node *unstable.Node) (int, error) {
+	end := -1
+	for it := node.Key(); it.Next(); {
+		keyNode := it.Node()
+		end = int(keyNode.Raw.Offset + keyNode.Raw.Length)
+	}
+	if end < 0 {
+		return 0, errors.New("TOML table header has no key range")
+	}
+	return end, nil
+}
+
+func tomlConsumeHeaderClose(raw []byte, pos int, kind unstable.Kind) (int, error) {
+	pos = tomlSkipInlineSpace(raw, pos)
+	brackets := 1
+	if kind == unstable.ArrayTable {
+		brackets = 2
+	}
+	for i := 0; i < brackets; i++ {
+		if pos >= len(raw) || raw[pos] != ']' {
+			return 0, errors.New("TOML table header does not close where the parser reported its keys")
+		}
+		pos++
+	}
+	return pos, nil
+}
+
+func tomlSkipInlineSpace(raw []byte, pos int) int {
+	for pos < len(raw) && (raw[pos] == ' ' || raw[pos] == '\t') {
+		pos++
+	}
+	return pos
+}
+
+func isCodexServerRoot(expr codexExpression) bool {
+	return len(expr.path) == 2 && expr.path[0] == "mcp_servers" && (expr.kind == unstable.Table || expr.kind == unstable.KeyValue)
+}
+
+// codexRemovalExtent bounds the entry rooted at expressions[rootIdx] purely
+// from the expression stream: the extent runs from the end of the last
+// expression before the entry's owned block to the end of the entry's last
+// descendant line, so every byte from the following expression's line onward
+// survives untouched. A contiguous comment block immediately above a table
+// header belongs to that header and is removed with it. A descendant of the
+// root anywhere outside the contiguous extent — before or after it — means
+// the entry is scattered; refuse rather than remove it partially.
+func codexRemovalExtent(raw []byte, expressions []codexExpression, rootIdx int, path string) (byteRange, error) {
+	root := expressions[rootIdx]
+	blockStart := rootIdx
+	if root.kind == unstable.Table {
+		for blockStart > 0 {
+			prev := expressions[blockStart-1]
+			if prev.kind != unstable.Comment || !tomlExpressionsAdjacent(raw, prev, expressions[blockStart]) {
+				break
+			}
+			blockStart--
+		}
+	}
+	start := 0
+	if blockStart > 0 {
+		start = expressions[blockStart-1].lineEnd
+	}
+	end := root.lineEnd
+	next := len(expressions)
+	for i := rootIdx + 1; i < len(expressions); i++ {
+		expr := expressions[i]
+		if expr.kind == unstable.Comment {
+			continue
+		}
+		if !hasTOMLPathPrefix(expr.path, root.path) {
+			next = i
+			break
+		}
+		end = expr.lineEnd
+	}
+	for i, expr := range expressions {
+		if i >= rootIdx && i < next {
+			continue
+		}
+		if hasTOMLPathPrefix(expr.path, root.path) {
+			return byteRange{}, fmt.Errorf("existing Codex config %s scatters mcp_servers entry %q across the file; cannot verify or remove", path, root.path[1])
+		}
+	}
+	if blockStart == 0 {
+		// No expression precedes the entry, so there is no boundary to end the
+		// extent at on that side; the extent instead runs forward to the start
+		// of the following expression's line so the file does not begin with a
+		// leftover separator gap.
+		end = tomlConsumeBlankLines(raw, end)
+	}
+	return byteRange{start: start, end: end}, nil
+}
+
+// tomlConsumeBlankLines advances over whole blank lines (inline whitespace
+// followed by a line terminator) and returns the offset of the first line with
+// content, or len(raw) when only blank space remains.
+func tomlConsumeBlankLines(raw []byte, pos int) int {
+	for {
+		lineStart := pos
+		i := tomlSkipInlineSpace(raw, pos)
+		switch {
+		case i >= len(raw):
+			return len(raw)
+		case raw[i] == '\n':
+			pos = i + 1
+		case raw[i] == '\r' && i+1 < len(raw) && raw[i+1] == '\n':
+			pos = i + 2
+		default:
+			return lineStart
+		}
+	}
+}
+
+// tomlExpressionsAdjacent reports whether next starts on the line immediately
+// after prev. The gap between prev's line end and next's first parser-reported
+// token can hold only whitespace and header brackets, so the two are adjacent
+// exactly when that gap contains no line break.
+func tomlExpressionsAdjacent(raw []byte, prev codexExpression, next codexExpression) bool {
+	if prev.lineEnd > next.anchor {
+		// Defensive bound only: the parser reports same-line trailing comments
+		// as sibling nodes, never as standalone expressions, so today prev's
+		// line cannot end past next's first token. This guards a parser
+		// contract change, not a live input shape.
+		return false
+	}
+	return !bytes.ContainsAny(raw[prev.lineEnd:next.anchor], "\r\n")
+}
+
+func hasTOMLPathPrefix(path []string, prefix []string) bool {
+	if len(path) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if path[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func codexNodeHoldsCredential(path []string, node *unstable.Node) bool {
+	if len(path) > 0 && path[len(path)-1] == "bearer_token" {
+		return true
+	}
+	if len(path) > 0 && credentialContainerKey(path[len(path)-1]) && codexNodeHasStringValue(node.Value()) {
+		return true
+	}
+	if len(path) >= 2 && credentialContainerKey(path[len(path)-2]) && codexNodeHasStringValue(node.Value()) {
+		return true
+	}
+	return codexInlineTableHoldsCredential(node.Value(), nil)
+}
+
+func codexInlineTableHoldsCredential(node *unstable.Node, path []string) bool {
+	if node == nil || node.Kind != unstable.InlineTable {
+		return false
+	}
+	for children := node.Children(); children.Next(); {
+		child := children.Node()
+		if child.Kind != unstable.KeyValue {
+			continue
+		}
+		keyPath, _, err := tomlKeyPath(child)
+		if err == nil && len(keyPath) > 0 && keyPath[len(keyPath)-1] == "bearer_token" {
+			return true
+		}
+		fullPath := append(append([]string{}, path...), keyPath...)
+		if len(fullPath) >= 2 && credentialContainerKey(fullPath[len(fullPath)-2]) && codexNodeHasStringValue(child.Value()) {
+			return true
+		}
+		if codexInlineTableHoldsCredential(child.Value(), fullPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexNodeHasStringValue(node *unstable.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case unstable.String:
+		return len(node.Data) > 0
+	case unstable.InlineTable:
+		for children := node.Children(); children.Next(); {
+			child := children.Node()
+			if child.Kind == unstable.KeyValue && codexNodeHasStringValue(child.Value()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func RemoveEntry(path string, adapter Adapter, name string) (bool, error) {
 	content, changed, err := buildJSONRemoval(path, adapter.ConfigKey, adapter.ClientID == "zed", name)
 	if err != nil || !changed {
@@ -1143,7 +1625,7 @@ func holdsCredential(v any) bool {
 }
 
 func credentialContainerKey(key string) bool {
-	return strings.EqualFold(key, "headers") || strings.EqualFold(key, "env") || strings.EqualFold(key, "environment")
+	return strings.EqualFold(key, "headers") || strings.EqualFold(key, "http_headers") || strings.EqualFold(key, "env") || strings.EqualFold(key, "environment")
 }
 
 func mapHasStringValue(v any) bool {

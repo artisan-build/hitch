@@ -225,7 +225,7 @@ INHERITED-UNVERIFIED is empty for the PR2 remote HTTP adapter matrix.
 
 | Client | Why |
 |---|---|
-| Codex | The config is TOML. PR2 ships the seven JSON writers and reports manual Codex setup instead of risking a lossy TOML rewrite. |
+| Codex | The config is TOML. Hitch prints manual setup instead of risking an install writer, but scan and uninstall support user-global Codex TOML with parser-provided byte ranges. |
 | Claude Desktop | MCP config is stdio-only; remote HTTP needs the `mcp-remote` proxy and a Node runtime. Writing a proxy entry would silently depend on local tooling. |
 | JetBrains | The MCP dialog has no Authorization-headers field. |
 
@@ -236,6 +236,31 @@ wording must include `hitch cannot configure Codex automatically yet` plus manua
 using `[mcp_servers.<name>]`, `bearer_token_env_var = "HITCH_TOKEN_<NAME>"`, and an
 `export HITCH_TOKEN_<NAME>=...` command. Explicit `--client codex` exits non-zero after printing
 those instructions; auto-detected Codex does not fail otherwise-successful JSON writes.
+
+For PR7, `hitch scan` and `hitch uninstall` support user-global `~/.codex/config.toml` only. Hitch
+still does not install Codex entries automatically. TOML removal parses with
+`github.com/pelletier/go-toml/v2/unstable`, uses parser-provided byte offsets, and splices exactly
+the matching server root plus its sub-tables without re-serializing the document. Two user-visible
+rules govern the splice:
+
+- **Comment ownership.** A contiguous comment block sitting immediately above the entry's table
+  header belongs to that header and is deleted with the entry — including comment lines the user
+  wrote by hand. Ownership is a table-header rule by design: a dotted-key entry
+  (`mcp_servers.<name> = {...}`) does not own the comment above it, so that comment survives as an
+  orphan after removal. A comment separated from the header by a blank line is not owned by the
+  header; when it precedes the entry it survives, but a comment lying inside the entry's contiguous
+  block — between the root and its own sub-tables — is removed with the block. Comment blocks above
+  a *following* table always survive.
+- **Scatter refusal.** If any expression belonging to the entry (for example a
+  `[mcp_servers.<name>.env]` sub-table) sits outside the entry's contiguous block — before it or
+  after an unrelated table — the entry is scattered. Hitch refuses with `UNREADABLE — cannot
+  verify`, exits non-zero, and leaves the file byte-identical. It never reports a removal that
+  would leave part of the entry (and possibly a credential) behind.
+
+Test environment pins are only meaningful when the code under test reads the environment per call.
+The `GIT_*` pins are useful because each git invocation receives a fresh environment; `TZ` pins inside
+Go tests are not load-bearing for `time.Local`, which is cached after first use. Datetime preservation
+tests should use literal non-UTC offsets in fixtures rather than per-test `TZ` changes.
 
 Failed TOML approaches in PR2, deliberately not kept:
 
