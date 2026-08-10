@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/artisan-build/hitch/internal/harness"
@@ -57,10 +58,40 @@ func newVersionCommand() *cobra.Command {
 		Use:   "version",
 		Short: "Print build version information",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "version: %s\ncommit: %s\ndate: %s\n", Version, Commit, Date)
+			version, commit, date := buildVersionInfo()
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "version: %s\ncommit: %s\ndate: %s\n", version, commit, date)
 			return err
 		},
 	}
+}
+
+func buildVersionInfo() (string, string, string) {
+	version := Version
+	commit := Commit
+	date := Date
+	if info, ok := debug.ReadBuildInfo(); ok {
+		version, commit, date = versionInfoFromBuildInfo(version, commit, date, info)
+	}
+	return version, commit, date
+}
+
+func versionInfoFromBuildInfo(version string, commit string, date string, info *debug.BuildInfo) (string, string, string) {
+	if version == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		version = info.Main.Version
+	}
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			if commit == "none" && setting.Value != "" {
+				commit = setting.Value
+			}
+		case "vcs.time":
+			if date == "unknown" && setting.Value != "" {
+				date = setting.Value
+			}
+		}
+	}
+	return version, commit, date
 }
 
 func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
