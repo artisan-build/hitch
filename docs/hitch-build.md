@@ -330,7 +330,9 @@ server. Tests must cover the unreadable-config path explicitly.
 on `v*` tags, `install.sh` curl one-liner, Homebrew formula for `artisan-build/homebrew-tap`, and
 an `hitch-mcp` npm shim package that downloads the matching binary so `npx hitch-mcp <url> <token>`
 works. **v0.0.1 is authorized per-version, and Ed does the tagging** — not the implementer and not
-the coordinator. PR6 lands the machinery only.
+the coordinator. PR6 lands the machinery only. npm publishing must remain guarded behind both
+`NPM_TOKEN` and `NPM_PUBLISH_ENABLED=true` until `npm/hitch-mcp/bin/hitch-mcp.js` has an automated
+test; the redirect-handling bug shipped undetected because nothing ever ran the downloader.
 
 ---
 
