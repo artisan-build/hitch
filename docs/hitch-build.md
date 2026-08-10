@@ -143,7 +143,6 @@ and getting any one of these wrong silently produces a config the client ignores
 |---|---|---|---|
 | Claude Code | `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`) | `mcpServers` | `{type: "http", url, headers}` |
 | Cursor | `~/.cursor/mcp.json` | `mcpServers` | `{url, headers}` |
-| Codex | `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | `mcp_servers` | `{url, bearer_token_env_var}` — **TOML** |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` | `{serverUrl, headers}` |
 | Zed | platform-specific `zed/settings.json` | `context_servers` | `{url, headers}` — **JSONC** |
 | VS Code | platform-specific `Code/User/mcp.json` | `servers` | `{type: "http", url, headers}` |
@@ -196,10 +195,28 @@ INHERITED-UNVERIFIED is empty for the PR2 remote HTTP adapter matrix.
 
 | Client | Why |
 |---|---|
+| Codex | The config is TOML. PR2 ships the seven JSON writers and reports manual Codex setup instead of risking a lossy TOML rewrite. |
 | Claude Desktop | MCP config is stdio-only; remote HTTP needs the `mcp-remote` proxy and a Node runtime. Writing a proxy entry would silently depend on local tooling. |
 | JetBrains | The MCP dialog has no Authorization-headers field. |
 
 These return honest instructions via `hitch prompt`, not a broken config.
+
+For PR2, Codex is also reported from `hitch install` when detected or explicitly selected. The exact
+wording must include `hitch cannot configure Codex automatically yet` plus manual TOML instructions
+using `[mcp_servers.<name>]`, `bearer_token_env_var = "HITCH_TOKEN_<NAME>"`, and an
+`export HITCH_TOKEN_<NAME>=...` command. Explicit `--client codex` exits non-zero after printing
+those instructions; auto-detected Codex does not fail otherwise-successful JSON writes.
+
+Failed TOML approaches in PR2, deliberately not kept:
+
+- Splicing between byte offsets deleted everything from hitch's table to EOF when the next header was
+  an array-of-tables.
+- Whole-document re-serialization destroyed all comments and formatting. It also silently shifted
+  TOML local date/time values by the host's UTC offset: `1979-05-27T07:32:00` became `05:32:00`, and
+  `local_date` lost a whole day. That failure is invisible under UTC, so CI could never catch it.
+- The line-scan span finder matched header text inside multi-line strings, deleting the closing
+  delimiter, and failed to match equivalent-but-differently-spelled table names like
+  `[mcp_servers.x]` versus `[mcp_servers."x"]`, producing files that no longer parse.
 
 ### Detection
 
@@ -271,12 +288,15 @@ Each PR is independently shippable and leaves `main` green.
 (gofmt + `go vet` + golangci-lint + `go test ./...`), README stub. Establishes the gate everything
 else is judged against.
 
-**PR2 — remote HTTP install (the core).** Adapter registry for all 8 file-writer clients, name
+**PR2 — remote HTTP install (the core).** Adapter registry for the 7 JSON file-writer clients, name
 inference, token resolution (argv / `--token-stdin` / `--token-env` / masked prompt), the
 interactive picker, `-y`/`--client`/`--dry-run`, atomic 0600 writes, refuse-to-clobber, honest
 multi-harness summary. **Table-driven tests per client against a temp HOME**, covering: fresh file,
 existing file with unrelated keys preserved, existing entry updated idempotently, malformed file
 refused, non-TTY without `-y` exits non-zero, token never appears in any output.
+
+Codex is intentionally split out of PR2's writable adapter set. Keep Codex detection and `CODEX_HOME`
+path handling, but surface it as manual/not-yet-implemented until a safe TOML editing strategy exists.
 
 **PR3 — stdio servers.** `--command` / `--args` / `--env` across the same matrix, with per-client
 stdio shapes verified against current docs. Same test depth.
