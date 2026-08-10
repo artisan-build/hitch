@@ -786,13 +786,40 @@ func TestUninstallRemovesEntryForEveryClientAndPreservesOtherContent(t *testing.
 			if strings.Contains(after, "renamed") || strings.Contains(after, "REMOVE_SENTINEL_SECRET") {
 				t.Fatalf("removed entry or token survived:\n%s", after)
 			}
-			for _, want := range []string{"\"zeta\": true", "\"alpha\": false", "\"alpha\": {\"url\": \"https://alpha/mcp\"}", "\"omega\": {\"url\": \"https://omega/mcp\"}"} {
-				if !strings.Contains(after, want) {
-					t.Fatalf("after missing preserved content %q:\n%s", want, after)
-				}
+			data := readJSON(t, path)
+			if data["zeta"] != true || data["alpha"] != false {
+				t.Fatalf("top-level unrelated keys not preserved: %#v", data)
 			}
-			readJSON(t, path)
+			servers := data[tt.key].(map[string]any)
+			if servers["renamed"] != nil || servers["alpha"] == nil || servers["omega"] == nil {
+				t.Fatalf("server map after removal = %#v, want alpha and omega only", servers)
+			}
 		})
+	}
+}
+
+func TestUninstallAfterInstallOnCompactForeignConfigLeavesValidJSON(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	foreign := `{"mcpServers":{"keep":{"url":"https://keep.test/mcp"}},"otherKey":1}`
+	writeFile(t, path, foreign, 0o600)
+	if _, err := InstallRemote(baseOptions(testEnv(home), "cursor")); err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	installed := readFile(t, path)
+	if installed == foreign || !strings.Contains(installed, "renamed") {
+		t.Fatalf("install did not create mixed foreign document:\n%s", installed)
+	}
+	res, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err != nil || len(res.Removed) != 1 {
+		t.Fatalf("Uninstall err = %v removed = %#v", err, res.Removed)
+	}
+	data := readJSON(t, path)
+	servers := data["mcpServers"].(map[string]any)
+	if servers["renamed"] != nil || servers["keep"] == nil || data["otherKey"] != float64(1) {
+		t.Fatalf("after uninstall data = %#v, want keep and otherKey preserved with renamed gone", data)
 	}
 }
 

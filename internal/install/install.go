@@ -800,20 +800,19 @@ func buildJSONRemoval(path string, key string, zedHint bool, name string) ([]byt
 	if !ok {
 		return nil, false, fmt.Errorf("existing config %s is not a JSON object", path)
 	}
-	if servers, ok := object[key]; ok {
-		if _, ok := servers.(map[string]any); !ok {
-			return nil, false, fmt.Errorf("existing config %s has non-object %q", path, key)
-		}
+	serversRaw, ok := object[key]
+	if !ok {
+		return nil, false, nil
 	}
-	keyRange, found, err := findTopLevelObjectValue(raw, key)
-	if err != nil || !found {
-		return nil, false, err
+	servers, ok := serversRaw.(map[string]any)
+	if !ok {
+		return nil, false, fmt.Errorf("existing config %s has non-object %q", path, key)
 	}
-	serverRange, serverFound, err := findTopLevelObjectMemberInRange(raw, name, keyRange)
-	if err != nil || !serverFound {
-		return nil, false, err
+	if _, ok := servers[name]; !ok {
+		return nil, false, nil
 	}
-	updated, err := removeObjectMember(raw, keyRange, serverRange)
+	delete(servers, name)
+	updated, err := marshalJSON(object)
 	if err != nil {
 		return nil, false, err
 	}
@@ -837,110 +836,6 @@ func findTopLevelObjectValueInRange(raw []byte, key string, bounds byteRange) (b
 		return byteRange{}, found, err
 	}
 	return byteRange{start: base + span.start, end: base + span.end}, true, nil
-}
-
-func findTopLevelObjectMemberInRange(raw []byte, key string, bounds byteRange) (byteRange, bool, error) {
-	if bounds.start < 0 || bounds.end > len(raw) || bounds.start >= bounds.end {
-		return byteRange{}, false, errors.New("invalid JSON object range")
-	}
-	base := bounds.start
-	section := raw[bounds.start:bounds.end]
-	span, found, err := findTopLevelObjectMemberInSection(section, key)
-	if err != nil || !found {
-		return byteRange{}, found, err
-	}
-	return byteRange{start: base + span.start, end: base + span.end}, true, nil
-}
-
-func findTopLevelObjectMemberInSection(raw []byte, key string) (byteRange, bool, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	tok, err := dec.Token()
-	if err != nil {
-		return byteRange{}, false, err
-	}
-	delim, ok := tok.(json.Delim)
-	if !ok || delim != '{' {
-		return byteRange{}, false, errors.New("existing config is not a JSON object")
-	}
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return byteRange{}, false, err
-		}
-		keyString, ok := keyTok.(string)
-		if !ok {
-			return byteRange{}, false, errors.New("JSON object key is not a string")
-		}
-		keyEnd := int(dec.InputOffset())
-		keyStart, err := jsonStringStart(raw, keyEnd-1)
-		if err != nil {
-			return byteRange{}, false, err
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return byteRange{}, false, err
-		}
-		valueEnd := int(dec.InputOffset())
-		if keyString == key {
-			return byteRange{start: keyStart, end: valueEnd}, true, nil
-		}
-	}
-	if _, err := dec.Token(); err != nil {
-		return byteRange{}, false, err
-	}
-	return byteRange{}, false, nil
-}
-
-func jsonStringStart(raw []byte, endQuote int) (int, error) {
-	for i := endQuote; i >= 0; i-- {
-		if raw[i] != '"' {
-			continue
-		}
-		backslashes := 0
-		for j := i - 1; j >= 0 && raw[j] == '\\'; j-- {
-			backslashes++
-		}
-		if backslashes%2 == 0 {
-			return i, nil
-		}
-	}
-	return 0, errors.New("could not locate JSON object key start")
-}
-
-func removeObjectMember(raw []byte, objectRange byteRange, memberRange byteRange) ([]byte, error) {
-	if objectRange.start < 0 || objectRange.end > len(raw) || memberRange.start < objectRange.start || memberRange.end > objectRange.end {
-		return nil, errors.New("invalid JSON removal range")
-	}
-	before := memberRange.start
-	for before > objectRange.start+1 && isSpace(raw[before-1]) {
-		before--
-	}
-	if before > objectRange.start+1 && raw[before-1] == ',' {
-		return replaceRange(raw, before-1, memberRange.end, nil), nil
-	}
-	after := memberRange.end
-	for after < objectRange.end-1 && isSpace(raw[after]) {
-		after++
-	}
-	if after < objectRange.end-1 && raw[after] == ',' {
-		lineStart := memberRange.start
-		for lineStart > objectRange.start+1 && raw[lineStart-1] != '\n' && raw[lineStart-1] != '\r' {
-			lineStart--
-		}
-		return replaceRange(raw, lineStart, after+1, nil), nil
-	}
-	lineStart := memberRange.start
-	for lineStart > objectRange.start+1 && raw[lineStart-1] != '\n' && raw[lineStart-1] != '\r' {
-		lineStart--
-	}
-	lineEnd := memberRange.end
-	for lineEnd < objectRange.end-1 && raw[lineEnd] != '\n' && raw[lineEnd] != '\r' {
-		lineEnd++
-	}
-	if lineEnd < objectRange.end-1 {
-		lineEnd++
-	}
-	return replaceRange(raw, lineStart, lineEnd, nil), nil
 }
 
 func holdsCredential(v any) bool {
