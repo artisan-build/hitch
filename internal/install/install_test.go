@@ -459,6 +459,22 @@ func TestEmptySanitizedNameErrorsAndWritesNothing(t *testing.T) {
 	}
 }
 
+func TestEmptyInferredNameErrorsAndWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := baseOptions(testEnv(home), "cursor")
+	opts.URL = "https://!!!/mcp"
+	opts.Name = ""
+	_, err := InstallRemote(opts)
+	if err == nil || !strings.Contains(err.Error(), "could not infer a usable server name") {
+		t.Fatalf("error = %v, want unusable inferred name", err)
+	}
+	if _, statErr := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid inferred name wrote config, stat err = %v", statErr)
+	}
+}
+
 func TestDeclinedAmbiguousNameErrorsAndWritesNothing(t *testing.T) {
 	t.Parallel()
 
