@@ -12,6 +12,7 @@ import (
 
 	"github.com/artisan-build/hitch/internal/harness"
 	installpkg "github.com/artisan-build/hitch/internal/install"
+	"github.com/charmbracelet/huh"
 )
 
 func TestInstallNonTTYWithoutYesOrClientExitsNonZeroAndWritesNothing(t *testing.T) {
@@ -654,6 +655,61 @@ func TestPickerSelectionDefaultsToAllAndAllowsEmpty(t *testing.T) {
 	}
 }
 
+func TestPickTargetsUsesRunnerSelectionAndIgnoresUnknownIDs(t *testing.T) {
+	targets := []installpkg.Target{
+		{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor"}, Path: "/tmp/cursor.json"},
+		{Client: harness.DetectionResult{ID: "zed", Name: "Zed"}, Path: "/tmp/zed.json"},
+		{Client: harness.DetectionResult{ID: "vscode", Name: "VS Code"}, Path: "/tmp/vscode.json"},
+	}
+	oldRun := runInstallPicker
+	t.Cleanup(func() { runInstallPicker = oldRun })
+
+	for _, tt := range []struct {
+		name        string
+		preferred   map[string]bool
+		runnerIDs   []string
+		wantInitial string
+		wantIDs     string
+	}{
+		{name: "strict subset", preferred: map[string]bool{"cursor": true, "vscode": true}, runnerIDs: []string{"zed"}, wantInitial: "cursor,vscode", wantIDs: "zed"},
+		{name: "empty selection", preferred: nil, runnerIDs: nil, wantInitial: "cursor,zed,vscode", wantIDs: ""},
+		{name: "unknown id ignored", preferred: nil, runnerIDs: []string{"missing", "cursor"}, wantInitial: "cursor,zed,vscode", wantIDs: "cursor"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runInstallPicker = func(url string, options []huh.Option[string], selected *[]string) error {
+				if url != "https://mcp.example.test/mcp" {
+					t.Fatalf("picker url = %q, want normalized url", url)
+				}
+				wantLabels := []string{"Cursor\t/tmp/cursor.json", "Zed\t/tmp/zed.json", "VS Code\t/tmp/vscode.json"}
+				if len(options) != len(wantLabels) {
+					t.Fatalf("options = %#v, want %d", options, len(wantLabels))
+				}
+				for i, wantLabel := range wantLabels {
+					if options[i].Key != wantLabel || options[i].Value != targets[i].Client.ID {
+						t.Fatalf("option %d = %#v, want label %q id %q", i, options[i], wantLabel, targets[i].Client.ID)
+					}
+				}
+				if got := strings.Join(*selected, ","); got != tt.wantInitial {
+					t.Fatalf("initial selection = %q, want %q", got, tt.wantInitial)
+				}
+				*selected = append([]string{}, tt.runnerIDs...)
+				return nil
+			}
+			chosen, err := pickTargets("https://mcp.example.test/mcp", targets, tt.preferred)
+			if err != nil {
+				t.Fatalf("pickTargets returned error: %v", err)
+			}
+			ids := make([]string, 0, len(chosen))
+			for _, target := range chosen {
+				ids = append(ids, target.Client.ID)
+			}
+			if got := strings.Join(ids, ","); got != tt.wantIDs {
+				t.Fatalf("chosen ids = %q, want %q", got, tt.wantIDs)
+			}
+		})
+	}
+}
+
 func TestInstallClientSelectionBypassesPickerAndValidatesNames(t *testing.T) {
 	home := t.TempDir()
 	pickerCalled := false
@@ -744,6 +800,271 @@ func TestInstallExitCodeIsOneWhenNoHarnessConfigured(t *testing.T) {
 	})
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
+	}
+}
+
+func TestScanCLIReportsThreeOutcomesAndDoesNotPrintToken(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{\"mcpServers\": {\"example\": {\"headers\": {\"Authorization\": \"Bearer SCAN_CLI_SECRET\"}, \"url\": \"https://mcp.example.test/mcp\"}}}\n", 0o600)
+	writeFile(t, filepath.Join(home, ".gemini", "settings.json"), "{not-json SCAN_PARSE_SECRET", 0o600)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"scan", "example"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{"Cursor\t" + filepath.Join(home, ".cursor", "mcp.json") + "\thas entry (holds a credential)", "Claude Code\t" + filepath.Join(home, ".claude.json") + "\tno entry", "Gemini CLI\t" + filepath.Join(home, ".gemini", "settings.json") + "\tUNREADABLE - cannot verify"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("scan output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "SCAN_CLI_SECRET") || strings.Contains(stdout.String()+stderr.String(), "SCAN_PARSE_SECRET") {
+		t.Fatalf("scan leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestScanAndUninstallCLIRefuseNameThatSanitizesDifferently(t *testing.T) {
+	for _, args := range [][]string{{"scan", "ZSentinel"}, {"uninstall", "ZSentinel", "--client", "cursor"}} {
+		home := t.TempDir()
+		writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{\"mcpServers\":{\"ZSentinel\":{\"headers\":{\"Authorization\":\"Bearer CASE_SECRET\"}}}}", 0o600)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := Main(args, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+		if code == 0 {
+			t.Fatalf("Main(%v) exit code = 0, want refusal", args)
+		}
+		if !strings.Contains(stdout.String()+stderr.String(), "exact stored key") {
+			t.Fatalf("output missing exact-key refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if strings.Contains(stdout.String()+stderr.String(), "CASE_SECRET") {
+			t.Fatalf("refusal leaked token; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestScanAndUninstallCLIReportCodexAsUnverifiable(t *testing.T) {
+	home := t.TempDir()
+	codexPath := filepath.Join(home, ".codex", "config.toml")
+	writeFile(t, codexPath, "[mcp_servers.example]\nurl = \"https://mcp.example.test/mcp\"\nbearer_token = \"CODEX_CLI_SECRET\"\n", 0o600)
+	writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{\"mcpServers\":{\"example\":{\"url\":\"https://mcp.example.test/mcp\",\"headers\":{\"Authorization\":\"Bearer CURSOR_SECRET\"}}}}", 0o600)
+	for _, tt := range []struct {
+		args     []string
+		wantCode int
+		wantOut  string
+	}{
+		{args: []string{"scan", "example"}, wantCode: 0, wantOut: "Codex\t" + codexPath + "\tUNREADABLE - cannot verify (hitch cannot configure Codex automatically yet"},
+		{args: []string{"uninstall", "example", "--yes"}, wantCode: 1, wantOut: "UNREADABLE - cannot verify: Codex (" + codexPath + ") - hitch cannot configure Codex automatically yet"},
+	} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := Main(tt.args, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+		if code != tt.wantCode {
+			t.Fatalf("Main(%v) code = %d, want %d; stdout=%q stderr=%q", tt.args, code, tt.wantCode, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), tt.wantOut) {
+			t.Fatalf("stdout missing %q: %q", tt.wantOut, stdout.String())
+		}
+		if strings.Contains(stdout.String()+stderr.String(), "CODEX_CLI_SECRET") || strings.Contains(stdout.String()+stderr.String(), "CURSOR_SECRET") {
+			t.Fatalf("Codex reporting leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestUninstallCLIExitCodesAndSummaries(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		setup    func(string)
+		wantCode int
+		wantOut  string
+	}{
+		{name: "removed some", setup: func(home string) {
+			writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{\"mcpServers\": {\"example\": {\"headers\": {\"Authorization\": \"Bearer UNINSTALL_CLI_SECRET\"}, \"url\": \"https://mcp.example.test/mcp\"}, \"other\": {\"url\": \"https://other/mcp\"}}}\n", 0o600)
+		}, wantCode: 0, wantOut: "Removed Cursor \"example\""},
+		{name: "removed none", setup: func(home string) {
+			writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{\"mcpServers\": {\"other\": {\"url\": \"https://other/mcp\"}}}\n", 0o600)
+		}, wantCode: 0, wantOut: "No matching \"example\" entries removed"},
+		{name: "could not verify", setup: func(home string) {
+			writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{not-json UNINSTALL_PARSE_SECRET", 0o600)
+		}, wantCode: 1, wantOut: "UNREADABLE - cannot verify: Cursor"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			tt.setup(home)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Main([]string{"uninstall", "example", "--client", "cursor"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.wantOut) {
+				t.Fatalf("stdout missing %q: %q", tt.wantOut, stdout.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), "UNINSTALL_CLI_SECRET") || strings.Contains(stdout.String()+stderr.String(), "UNINSTALL_PARSE_SECRET") {
+				t.Fatalf("uninstall leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestUninstallAbsentAndUnreadableOutcomesStayDistinct(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		body       string
+		wantCode   int
+		wantOutput string
+	}{
+		{name: "absent is clean no-op", body: "{\"mcpServers\": {\"other\": {\"url\": \"https://other/mcp\"}}}\n", wantCode: 0, wantOutput: "No matching \"example\" entries removed"},
+		{name: "unreadable is not clean", body: "{not-json DISTINCT_UNREADABLE_SECRET", wantCode: 1, wantOutput: "UNREADABLE - cannot verify: Cursor"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), tt.body, 0o600)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Main([]string{"uninstall", "example", "--client", "cursor"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.wantOutput) {
+				t.Fatalf("stdout missing %q: %q", tt.wantOutput, stdout.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), "DISTINCT_UNREADABLE_SECRET") {
+				t.Fatalf("uninstall leaked unreadable sentinel; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestUninstallNonTTYWithoutYesOrClientExitsTwoAndWritesNothing(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".cursor", "mcp.json")
+	before := "{\"mcpServers\": {\"example\": {\"headers\": {\"Authorization\": \"Bearer NONTTY_UNINSTALL_SECRET\"}, \"url\": \"https://mcp.example.test/mcp\"}}}\n"
+	writeFile(t, path, before, 0o600)
+	mkdirAll(t, filepath.Join(home, ".cursor"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"uninstall", "example"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty refusal path", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--yes") || !strings.Contains(stderr.String(), "--client") {
+		t.Fatalf("stderr = %q, want --yes and --client", stderr.String())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if got := string(raw); got != before {
+		t.Fatalf("non-TTY uninstall changed config to %q", got)
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "NONTTY_UNINSTALL_SECRET") {
+		t.Fatalf("non-TTY uninstall leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestUninstallSummaryReportsKeptEntries(t *testing.T) {
+	result := installpkg.UninstallResult{
+		Name: "x",
+		Kept: []installpkg.ScanResult{{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor"}, Path: "/tmp/cursor.json", HoldsCredential: true}},
+	}
+	var out bytes.Buffer
+	if err := printUninstallSummary(&out, result); err != nil {
+		t.Fatalf("printUninstallSummary returned error: %v", err)
+	}
+	if strings.Contains(out.String(), "No matching") || !strings.Contains(out.String(), "Kept Cursor \"x\" (/tmp/cursor.json, holds a credential)") {
+		t.Fatalf("kept summary output = %q", out.String())
+	}
+}
+
+func TestUninstallPickerModelSeparatesUnreadableFromSelectable(t *testing.T) {
+	targets := []installpkg.ScanResult{{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor"}, Path: "/tmp/cursor.json", HoldsCredential: true}}
+	unreadable := []installpkg.ScanResult{{Client: harness.DetectionResult{ID: "zed", Name: "Zed"}, Path: "/tmp/zed.json"}}
+	options, warnings := uninstallPickerModel(targets, unreadable)
+	if len(options) != 1 || options[0].ID != "cursor" || !strings.Contains(options[0].Label, "holds a credential") {
+		t.Fatalf("options = %#v, want cursor selectable", options)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "Zed") || !strings.Contains(warnings[0], "unreadable") {
+		t.Fatalf("warnings = %#v, want zed unreadable warning", warnings)
+	}
+}
+
+func TestPickUninstallTargetsUsesModelAndFiltersUnreadableSelections(t *testing.T) {
+	targets := []installpkg.ScanResult{{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor"}, Path: "/tmp/cursor.json", HoldsCredential: true}}
+	unreadable := []installpkg.ScanResult{{Client: harness.DetectionResult{ID: "zed", Name: "Zed"}, Path: "/tmp/zed.json"}}
+	oldRun := runUninstallPicker
+	t.Cleanup(func() { runUninstallPicker = oldRun })
+	runUninstallPicker = func(name string, options []huh.Option[string], selected *[]string) error {
+		if name != "x" {
+			t.Fatalf("picker name = %q, want x", name)
+		}
+		if len(options) != 1 || options[0].Value != "cursor" || !strings.Contains(options[0].Key, "holds a credential") {
+			t.Fatalf("options = %#v, want only cursor option", options)
+		}
+		*selected = []string{"zed", "cursor"}
+		return nil
+	}
+	var out bytes.Buffer
+	selected, err := pickUninstallTargets(&out, "x", targets, unreadable)
+	if err != nil {
+		t.Fatalf("pickUninstallTargets returned error: %v", err)
+	}
+	if len(selected) != 1 || selected[0].Client.ID != "cursor" {
+		t.Fatalf("selected = %#v, want cursor only", selected)
+	}
+	if !strings.Contains(out.String(), "Zed") || !strings.Contains(out.String(), "unreadable") {
+		t.Fatalf("picker warnings output = %q, want unreadable zed warning", out.String())
+	}
+}
+
+func TestSelectUninstallTargetsHonorsChoicesAndExcludesUnreadable(t *testing.T) {
+	targets := []installpkg.ScanResult{
+		{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor"}, Path: "/tmp/cursor.json"},
+		{Client: harness.DetectionResult{ID: "gemini-cli", Name: "Gemini CLI"}, Path: "/tmp/gemini.json"},
+		{Client: harness.DetectionResult{ID: "opencode", Name: "opencode"}, Path: "/tmp/opencode.json"},
+	}
+	unreadable := []installpkg.ScanResult{
+		{Client: harness.DetectionResult{ID: "zed", Name: "Zed"}, Path: "/tmp/zed.json"},
+		{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor Unreadable"}, Path: "/tmp/unreadable-cursor.json"},
+	}
+	for _, tt := range []struct {
+		name      string
+		chosenIDs []string
+		wantIDs   string
+	}{
+		{name: "chosen only in target order", chosenIDs: []string{"opencode", "cursor"}, wantIDs: "cursor,opencode"},
+		{name: "unchecked target omitted", chosenIDs: []string{"gemini-cli"}, wantIDs: "gemini-cli"},
+		{name: "unreadable chosen id omitted", chosenIDs: []string{"zed", "cursor"}, wantIDs: "cursor"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			selected := selectUninstallTargets(targets, unreadable, tt.chosenIDs)
+			ids := make([]string, 0, len(selected))
+			for _, target := range selected {
+				ids = append(ids, target.Client.ID)
+				if strings.Contains(target.Path, "unreadable") || target.Client.ID == "zed" {
+					t.Fatalf("selected unreadable target: %#v", target)
+				}
+			}
+			if got := strings.Join(ids, ","); got != tt.wantIDs {
+				t.Fatalf("selected ids = %q, want %q", got, tt.wantIDs)
+			}
+		})
+	}
+}
+
+func TestPromptCLIIncludesManualClientsAndCodexNotYetImplemented(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"prompt", "mcp.example.test/mcp"}, &stdout, &stderr, func() (harness.Env, error) { return harness.Env{}, nil })
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{"Claude Desktop", "JetBrains", "Codex", "hitch cannot configure Codex automatically yet", "https://mcp.example.test/mcp", "bearer_token_env_var"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("prompt output missing %q:\n%s", want, stdout.String())
+		}
 	}
 }
 

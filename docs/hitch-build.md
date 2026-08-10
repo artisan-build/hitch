@@ -373,7 +373,9 @@ test; the redirect-handling bug shipped undetected because nothing ever ran the 
 ## 10. Definition of done
 
 - `hitch install <url> <token>` configures every selected detected harness correctly, and each
-  client actually loads the server afterward (verify at least Claude Code and Cursor by hand).
+  client actually loads the server afterward. On this maintainer machine, Claude Code, Codex,
+  Gemini CLI, and opencode have real readable configs as evidence, but they must never be used as
+  test targets; copy any needed fixture into a temp HOME instead.
 - `hitch uninstall <name>` removes every copy and reports anything it could not verify.
 - No path prints or logs a token. Grep the test output to prove it.
 - CI green: gofmt, `go vet`, golangci-lint, `go test ./...`.
