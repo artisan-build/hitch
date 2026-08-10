@@ -532,8 +532,12 @@ func TestInstallDryRunHealthyConfigReportsWouldUpdate(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Dry run: would update "+path) {
-		t.Fatalf("dry-run output = %q, want would-update path", stdout.String())
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve path: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Dry run: would update "+resolvedPath) {
+		t.Fatalf("dry-run output = %q, want would-update path %q", stdout.String(), resolvedPath)
 	}
 }
 
@@ -735,6 +739,93 @@ func TestInstallClientSelectionBypassesPickerAndValidatesNames(t *testing.T) {
 	_, err = installpkg.InstallRemote(installpkg.Options{URL: "https://mcp.example.test/mcp", Name: "example", Clients: []string{"unknown"}, Env: testEnv(t.TempDir())})
 	if err == nil || !strings.Contains(err.Error(), "unknown file-writer client") {
 		t.Fatalf("unknown client error = %v", err)
+	}
+}
+
+func TestProjectInstallRemoteCLIWritesProjectPath(t *testing.T) {
+	project := t.TempDir()
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "PROJECT_REMOTE_TOKEN", "--project", "--client", "cursor", "--yes"}, &stdout, &stderr, func() (harness.Env, error) {
+		return projectEnv(project), nil
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q stdout = %q", code, stderr.String(), stdout.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("project cursor config was not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(project, "home", ".cursor", "mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("project remote install wrote global path, stat err = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "WARNING") || strings.Contains(stdout.String()+stderr.String(), "PROJECT_REMOTE_TOKEN") {
+		t.Fatalf("project install output = stdout %q stderr %q, want warning without token", stdout.String(), stderr.String())
+	}
+}
+
+func TestProjectInstallStdioCLIWritesProjectPath(t *testing.T) {
+	project := t.TempDir()
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "local-server", "--command", "npx", "--env", "API_KEY=PROJECT_STDIO_SECRET", "--project", "--client", "cursor", "--yes"}, &stdout, &stderr, func() (harness.Env, error) {
+		return projectEnv(project), nil
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q stdout = %q", code, stderr.String(), stdout.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("project cursor stdio config was not written: %v", err)
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "PROJECT_STDIO_SECRET") {
+		t.Fatalf("project stdio output leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestProjectScanAndUninstallCLIUseProjectPath(t *testing.T) {
+	project := t.TempDir()
+	projectPath := filepath.Join(project, ".cursor", "mcp.json")
+	globalPath := filepath.Join(project, "home", ".cursor", "mcp.json")
+	writeFile(t, projectPath, "{\"mcpServers\":{\"example\":{\"headers\":{\"Authorization\":\"Bearer PROJECT_CLI_SECRET\"},\"url\":\"https://mcp.example.test/mcp\"}}}\n", 0o600)
+	writeFile(t, globalPath, "{\"mcpServers\":{\"example\":{\"headers\":{\"Authorization\":\"Bearer GLOBAL_CLI_SECRET\"},\"url\":\"https://mcp.example.test/mcp\"}}}\n", 0o600)
+	var scanOut bytes.Buffer
+	var scanErr bytes.Buffer
+	code := Main([]string{"scan", "example", "--project"}, &scanOut, &scanErr, func() (harness.Env, error) { return projectEnv(project), nil })
+	if code != 0 {
+		t.Fatalf("scan exit code = %d, stderr = %q", code, scanErr.String())
+	}
+	if !strings.Contains(scanOut.String(), "Cursor\t"+projectPath+"\thas entry") || strings.Contains(scanOut.String(), globalPath) || strings.Contains(scanOut.String(), "PROJECT_CLI_SECRET") {
+		t.Fatalf("project scan output = %q", scanOut.String())
+	}
+	var uninstallOut bytes.Buffer
+	var uninstallErr bytes.Buffer
+	code = Main([]string{"uninstall", "example", "--project", "--client", "cursor"}, &uninstallOut, &uninstallErr, func() (harness.Env, error) { return projectEnv(project), nil })
+	if code != 0 {
+		t.Fatalf("uninstall exit code = %d, stderr = %q stdout = %q", code, uninstallErr.String(), uninstallOut.String())
+	}
+	if strings.Contains(readText(t, projectPath), "example") {
+		t.Fatalf("project uninstall left project entry")
+	}
+	if !strings.Contains(readText(t, globalPath), "GLOBAL_CLI_SECRET") {
+		t.Fatalf("project uninstall changed global config")
+	}
+}
+
+func TestConfirmProjectCredentialWriteUsesRunner(t *testing.T) {
+	oldRun := runProjectCredentialConfirm
+	t.Cleanup(func() { runProjectCredentialConfirm = oldRun })
+	called := false
+	runProjectCredentialConfirm = func(path string) (bool, error) {
+		called = true
+		if path != "/tmp/project/.cursor/mcp.json" {
+			t.Fatalf("confirm path = %q", path)
+		}
+		return true, nil
+	}
+	ok, err := confirmProjectCredentialWrite("/tmp/project/.cursor/mcp.json")
+	if err != nil || !ok || !called {
+		t.Fatalf("confirmProjectCredentialWrite = %v, %v, called=%v; want true nil called", ok, err, called)
 	}
 }
 
@@ -1093,6 +1184,25 @@ func onlyCursorServer(t *testing.T, home string) map[string]any {
 		return raw.(map[string]any)
 	}
 	panic("unreachable")
+}
+
+func projectEnv(project string) harness.Env {
+	return harness.Env{
+		Home:          filepath.Join(project, "home"),
+		XDGConfigHome: filepath.Join(project, "home", ".config"),
+		AppData:       filepath.Join(project, "home", "AppData", "Roaming"),
+		WorkDir:       project,
+		GOOS:          "darwin",
+	}
+}
+
+func readText(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %q: %v", path, err)
+	}
+	return string(raw)
 }
 
 type errReader struct{}

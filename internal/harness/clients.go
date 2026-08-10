@@ -70,6 +70,26 @@ func ConfigPath(clientID string, env Env) (string, bool, error) {
 	return "", false, nil
 }
 
+func ProjectConfigPath(clientID string, env Env) (string, bool, error) {
+	root := env.WorkDir
+	if root == "" || !filepath.IsAbs(root) {
+		return "", true, fmt.Errorf("project path must be absolute; check current working directory")
+	}
+	paths := map[string][]string{
+		"claude-code": {".mcp.json"},
+		"cursor":      {".cursor", "mcp.json"},
+		"zed":         {".zed", "settings.json"},
+		"vscode":      {".vscode", "mcp.json"},
+		"gemini-cli":  {".gemini", "settings.json"},
+		"opencode":    {"opencode.json"},
+	}
+	parts, ok := paths[clientID]
+	if !ok {
+		return "", false, nil
+	}
+	return filepath.Join(append([]string{root}, parts...)...), true, nil
+}
+
 func claudeCodeConfigPath(env Env) (string, error) {
 	if env.ClaudeConfigDir != "" {
 		return joinAbs("CLAUDE_CONFIG_DIR", env.ClaudeConfigDir, ".claude.json")

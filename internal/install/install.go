@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -54,6 +55,7 @@ type UninstallOptions struct {
 	Name        string
 	Clients     []string
 	Yes         bool
+	Project     bool
 	NonTTY      bool
 	PickTargets func([]ScanResult, []ScanResult) ([]ScanResult, error)
 	Env         harness.Env
@@ -80,21 +82,23 @@ func ValidateLookupName(name string) (string, error) {
 }
 
 type Options struct {
-	URL         string
-	Name        string
-	Headers     map[string]string
-	Command     string
-	Args        []string
-	StdioEnv    map[string]string
-	Clients     []string
-	Yes         bool
-	DryRun      bool
-	Forget      bool
-	NonTTY      bool
-	ConfirmName func(string) (bool, error)
-	PickTargets func([]Target, map[string]bool) ([]Target, error)
-	Env         harness.Env
-	Stdout      io.Writer
+	URL                 string
+	Name                string
+	Headers             map[string]string
+	Command             string
+	Args                []string
+	StdioEnv            map[string]string
+	Clients             []string
+	Yes                 bool
+	Project             bool
+	DryRun              bool
+	Forget              bool
+	NonTTY              bool
+	ConfirmName         func(string) (bool, error)
+	ConfirmProjectWrite func(string) (bool, error)
+	PickTargets         func([]Target, map[string]bool) ([]Target, error)
+	Env                 harness.Env
+	Stdout              io.Writer
 }
 
 type Result struct {
@@ -174,6 +178,10 @@ func AdapterByClientID(id string) (Adapter, bool) {
 }
 
 func Scan(env harness.Env, name string, clientIDs []string) ([]ScanResult, error) {
+	return ScanScoped(env, name, clientIDs, false)
+}
+
+func ScanScoped(env harness.Env, name string, clientIDs []string, project bool) ([]ScanResult, error) {
 	if name != "" {
 		var err error
 		name, err = ValidateLookupName(name)
@@ -185,7 +193,7 @@ func Scan(env harness.Env, name string, clientIDs []string) ([]ScanResult, error
 	for _, id := range clientIDs {
 		selected[id] = true
 	}
-	results, err := harness.Detect(env)
+	results, err := scanClients(env, project)
 	if err != nil {
 		return nil, err
 	}
@@ -214,6 +222,30 @@ func Scan(env harness.Env, name string, clientIDs []string) ([]ScanResult, error
 		}
 	}
 	return out, nil
+}
+
+func scanClients(env harness.Env, project bool) ([]harness.DetectionResult, error) {
+	if !project {
+		return harness.Detect(env)
+	}
+	root, err := projectRoot(env)
+	if err != nil {
+		return nil, err
+	}
+	env.WorkDir = root
+	clients := harness.FileWriterClients()
+	results := make([]harness.DetectionResult, 0, len(clients))
+	for _, client := range clients {
+		path, ok, err := harness.ProjectConfigPath(client.ID, env)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		results = append(results, harness.DetectionResult{ID: client.ID, Name: client.Name, ConfigPath: path, Detected: true})
+	}
+	return results, nil
 }
 
 func scanCodex(client harness.DetectionResult) ScanResult {
@@ -306,7 +338,7 @@ func Uninstall(opts UninstallOptions) (UninstallResult, error) {
 		return UninstallResult{}, nameErr
 	}
 	res := UninstallResult{Name: name}
-	scans, err := Scan(opts.Env, name, opts.Clients)
+	scans, err := ScanScoped(opts.Env, name, opts.Clients, opts.Project)
 	if err != nil {
 		return res, err
 	}
@@ -477,25 +509,34 @@ func InstallRemote(opts Options) (Result, error) {
 			continue
 		}
 		entry := adapter.BuildRemoteEntry(opts.URL, opts.Headers, res.CodexEnvVar)
-		if opts.DryRun {
-			if err := ValidateEntry(target.Path, adapter, name, entry); err != nil {
-				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
-				continue
-			}
-			res.WouldWrite = append(res.WouldWrite, target.Path)
-			if opts.Stdout != nil {
-				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, target.Path, MaskedJSON(entry))
-			}
-			continue
-		}
-		if err := WriteEntry(target.Path, adapter, name, entry); err != nil {
+		writePath, err := resolvedWritePath(target.Path)
+		if err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
 			continue
 		}
-		res.Written = append(res.Written, target.Path)
-		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: target.Path})
+		if err := guardProjectCredentialWrite(opts, writePath, entry); err != nil {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+			continue
+		}
+		if opts.DryRun {
+			if err := ValidateEntry(writePath, adapter, name, entry); err != nil {
+				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+				continue
+			}
+			res.WouldWrite = append(res.WouldWrite, writePath)
+			if opts.Stdout != nil {
+				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, writePath, MaskedJSON(entry))
+			}
+			continue
+		}
+		if err := WriteEntry(writePath, adapter, name, entry); err != nil {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+			continue
+		}
+		res.Written = append(res.Written, writePath)
+		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: writePath})
 	}
-	if interactive && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
+	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
 		for _, target := range targets {
 			ids = append(ids, target.Client.ID)
@@ -546,25 +587,34 @@ func InstallStdio(opts Options) (Result, error) {
 			continue
 		}
 		entry := adapter.BuildStdioEntry(opts.Command, opts.Args, opts.StdioEnv)
-		if opts.DryRun {
-			if err := ValidateEntry(target.Path, adapter, name, entry); err != nil {
-				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
-				continue
-			}
-			res.WouldWrite = append(res.WouldWrite, target.Path)
-			if opts.Stdout != nil {
-				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, target.Path, MaskedJSON(entry))
-			}
-			continue
-		}
-		if err := WriteEntry(target.Path, adapter, name, entry); err != nil {
+		writePath, err := resolvedWritePath(target.Path)
+		if err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
 			continue
 		}
-		res.Written = append(res.Written, target.Path)
-		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: target.Path})
+		if err := guardProjectCredentialWrite(opts, writePath, entry); err != nil {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+			continue
+		}
+		if opts.DryRun {
+			if err := ValidateEntry(writePath, adapter, name, entry); err != nil {
+				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+				continue
+			}
+			res.WouldWrite = append(res.WouldWrite, writePath)
+			if opts.Stdout != nil {
+				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, writePath, MaskedJSON(entry))
+			}
+			continue
+		}
+		if err := WriteEntry(writePath, adapter, name, entry); err != nil {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+			continue
+		}
+		res.Written = append(res.Written, writePath)
+		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: writePath})
 	}
-	if interactive && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
+	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
 		for _, target := range targets {
 			ids = append(ids, target.Client.ID)
@@ -633,6 +683,9 @@ func codexStdioManualInstructions(name string, command string, args []string, en
 }
 
 func resolveTargets(opts Options) ([]Target, bool, error) {
+	if opts.Project {
+		return resolveProjectTargets(opts)
+	}
 	results, err := harness.Detect(opts.Env)
 	if err != nil {
 		return nil, false, err
@@ -679,6 +732,65 @@ func resolveTargets(opts Options) ([]Target, bool, error) {
 	return chosen, true, err
 }
 
+func resolveProjectTargets(opts Options) ([]Target, bool, error) {
+	root, err := projectRoot(opts.Env)
+	if err != nil {
+		return nil, false, err
+	}
+	opts.Env.WorkDir = root
+	projectResults, err := scanClients(opts.Env, true)
+	if err != nil {
+		return nil, false, err
+	}
+	globalResults, err := harness.Detect(opts.Env)
+	if err != nil {
+		return nil, false, err
+	}
+	detectedByID := map[string]bool{}
+	for _, result := range globalResults {
+		detectedByID[result.ID] = result.Detected
+	}
+	byID := map[string]harness.DetectionResult{}
+	knownNoProjectPath := map[string]bool{}
+	for _, client := range harness.FileWriterClients() {
+		if _, ok, err := harness.ProjectConfigPath(client.ID, opts.Env); err == nil && !ok {
+			knownNoProjectPath[client.ID] = true
+		}
+	}
+	targets := []Target{}
+	for _, result := range projectResults {
+		byID[result.ID] = result
+		if _, ok := AdapterByClientID(result.ID); ok && detectedByID[result.ID] {
+			targets = append(targets, Target{Client: result, Path: result.ConfigPath})
+		}
+	}
+	if len(opts.Clients) > 0 {
+		selected := make([]Target, 0, len(opts.Clients))
+		for _, id := range opts.Clients {
+			result, ok := byID[id]
+			if !ok {
+				if knownNoProjectPath[id] {
+					return nil, false, fmt.Errorf("client %q has no project config path", id)
+				}
+				return nil, false, fmt.Errorf("unknown file-writer client %q", id)
+			}
+			selected = append(selected, Target{Client: result, Path: result.ConfigPath})
+		}
+		return selected, false, nil
+	}
+	if opts.Yes {
+		return targets, false, nil
+	}
+	if opts.NonTTY {
+		return nil, false, fmt.Errorf("non-TTY install requires either -y/--yes or -c/--client")
+	}
+	if opts.PickTargets == nil {
+		return nil, false, fmt.Errorf("interactive picker is unavailable")
+	}
+	chosen, err := opts.PickTargets(targets, nil)
+	return chosen, true, err
+}
+
 func codexDetected(env harness.Env) bool {
 	results, err := harness.Detect(env)
 	if err != nil {
@@ -690,6 +802,108 @@ func codexDetected(env harness.Env) bool {
 		}
 	}
 	return false
+}
+
+func guardProjectCredentialWrite(opts Options, path string, entry map[string]any) error {
+	if !opts.Project || !holdsCredential(entry) {
+		return nil
+	}
+	ignored, err := projectPathIgnored(opts.Env, path)
+	if err != nil {
+		ignored = false
+	}
+	if ignored {
+		return nil
+	}
+	if opts.Stdout != nil {
+		_, _ = fmt.Fprintf(opts.Stdout, "WARNING: project config %s is not gitignored; it may store credentials.\n", path)
+	}
+	if opts.Yes {
+		return nil
+	}
+	if opts.DryRun {
+		return nil
+	}
+	if opts.NonTTY {
+		return fmt.Errorf("project config %s is not gitignored; rerun with -y/--yes to write credentials anyway", path)
+	}
+	if opts.ConfirmProjectWrite == nil {
+		return fmt.Errorf("project config %s is not gitignored; confirmation is unavailable", path)
+	}
+	ok, err := opts.ConfirmProjectWrite(path)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("project config %s is not gitignored; write declined", path)
+	}
+	return nil
+}
+
+var projectPathIgnored = gitCheckIgnored
+
+func resolvedWritePath(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return "", fmt.Errorf("config path must be absolute: %q", path)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if os.IsNotExist(err) {
+		return path, nil
+	}
+	return "", fmt.Errorf("could not resolve config path %s: %w", path, err)
+}
+
+func projectRoot(env harness.Env) (string, error) {
+	if env.WorkDir == "" || !filepath.IsAbs(env.WorkDir) {
+		return "", fmt.Errorf("project path must be absolute; check current working directory")
+	}
+	cmd := exec.Command("git", "-C", env.WorkDir, "rev-parse", "--show-toplevel")
+	cmd.Env = gitAllowlistEnv(os.Environ())
+	out, err := cmd.Output()
+	if err != nil {
+		return env.WorkDir, nil
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" || !filepath.IsAbs(root) {
+		return "", fmt.Errorf("git reported invalid project root %q", root)
+	}
+	return root, nil
+}
+
+func gitCheckIgnored(env harness.Env, path string) (bool, error) {
+	root, err := projectRoot(env)
+	if err != nil {
+		return false, err
+	}
+	cmd := exec.Command("git", "-C", root, "check-ignore", "-q", "--", path)
+	cmd.Env = gitAllowlistEnv(os.Environ())
+	err = cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		switch exitErr.ExitCode() {
+		case 1, 128:
+			return false, nil
+		}
+	}
+	return false, err
+}
+
+func gitAllowlistEnv(env []string) []string {
+	out := []string{}
+	for _, value := range env {
+		key, _, _ := strings.Cut(value, "=")
+		switch key {
+		case "HOME", "PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM":
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func CodexTokenEnvVar(name string) string {

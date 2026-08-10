@@ -318,6 +318,51 @@ func TestConfigPathLiteralTable(t *testing.T) {
 	}
 }
 
+func TestProjectConfigPathLiteralTable(t *testing.T) {
+	t.Parallel()
+
+	project := filepath.Join(string(filepath.Separator), "work", "project")
+	env := Env{Home: "/home/test", WorkDir: project, XDGConfigHome: "/xdg", AppData: "/appdata", GOOS: "darwin"}
+	tests := map[string]string{
+		"claude-code": filepath.Join(project, ".mcp.json"),
+		"cursor":      filepath.Join(project, ".cursor", "mcp.json"),
+		"zed":         filepath.Join(project, ".zed", "settings.json"),
+		"vscode":      filepath.Join(project, ".vscode", "mcp.json"),
+		"gemini-cli":  filepath.Join(project, ".gemini", "settings.json"),
+		"opencode":    filepath.Join(project, "opencode.json"),
+	}
+	for id, want := range tests {
+		id, want := id, want
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			got, ok, err := ProjectConfigPath(id, env)
+			if err != nil {
+				t.Fatalf("ProjectConfigPath returned error: %v", err)
+			}
+			if !ok {
+				t.Fatalf("ProjectConfigPath did not find %s", id)
+			}
+			if got != want {
+				t.Fatalf("ProjectConfigPath(%s) = %q, want %q", id, got, want)
+			}
+		})
+	}
+	for _, id := range []string{"codex", "windsurf"} {
+		if got, ok, err := ProjectConfigPath(id, env); err != nil || ok || got != "" {
+			t.Fatalf("ProjectConfigPath(%s) = %q, %v, %v; want unsupported", id, got, ok, err)
+		}
+	}
+}
+
+func TestProjectConfigPathRejectsMissingWorkDir(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := ProjectConfigPath("cursor", Env{Home: "/home/test", GOOS: "darwin"})
+	if err == nil || !strings.Contains(err.Error(), "current working directory") {
+		t.Fatalf("ProjectConfigPath missing WorkDir error = %v, want current working directory", err)
+	}
+}
+
 func TestConfigPathPerGOOS(t *testing.T) {
 	t.Parallel()
 
