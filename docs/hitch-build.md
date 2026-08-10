@@ -244,9 +244,20 @@ which always exists, so detect on `~/.claude` (or `$CLAUDE_CONFIG_DIR`) instead.
 
 ### stdio entry shapes (PR3)
 
-Same clients, different shape — `{command, args, env}` under the same config key, with per-client
-deviations. Verify each against that client's current docs while implementing; do not assume the
-remote shape's key names carry over.
+Same clients, different shape. Do not carry remote URL key names into stdio entries.
+
+| Client | Key | Entry shape | Tier | Citation | Limitation |
+|---|---|---|---|---|---|
+| Claude Code | `mcpServers` | `{command, args, env}` | VENDOR-DOCUMENTED | `docs.anthropic.com/en/docs/claude-code/mcp`, local stdio examples and plugin `.mcp.json` examples | Claude Code is closed source; docs also state entries with no `type` are read as stdio. |
+| Codex | `mcp_servers` | TOML manual only: `command`, `args`, `env`/env vars under `[mcp_servers.<name>]` | SOURCE-VERIFIED | `openai/codex` `codex-rs/core/src/config/config_tests.rs`, `codex-rs/core/src/config/mod.rs load_global_mcp_servers()` | hitch still does not write Codex TOML; it prints manual instructions. |
+| Cursor | `mcpServers` | `{type: "stdio", command, args, env}` | VENDOR-DOCUMENTED | `cursor.com/docs/context/mcp`, STDIO server configuration table | Closed source; examples omit `type`, but the field table marks `type` required for stdio. |
+| Windsurf | `mcpServers` | `{command, args, env}` | VENDOR-DOCUMENTED | `docs.devin.ai/desktop/cascade/mcp`, `mcp_config.json` examples | Closed source; docs also mention remote accepts `serverUrl` or `url`, which does not apply to stdio. |
+| Zed | `context_servers` | `{command, args, env}` | SOURCE-VERIFIED | `zed-industries/zed` `crates/settings_content/src/project.rs ContextServerSettingsContent::Stdio` and `ContextServerCommand` | Source allows optional `enabled`, `remote`, and `timeout`; hitch writes only the core server launch fields. |
+| VS Code | `servers` | `{type: "stdio", command, args, env}` | SOURCE-VERIFIED | `microsoft/vscode` `src/vs/platform/mcp/common/mcpPlatformTypes.ts IMcpStdioServerConfiguration` | Source also supports optional `envFile`, `cwd`, sandbox, and dev fields; hitch writes only the core server launch fields. |
+| Gemini CLI | `mcpServers` | `{command, args, env}` | SOURCE-VERIFIED | `google-gemini/gemini-cli` `packages/core/src/config/config.ts MCPServerConfig` | Source also supports optional `cwd`, `timeout`, trust/tool fields, and network transports. |
+| opencode | `mcp` | `{type: "local", command: [cmd, ...args], environment}` | SOURCE-VERIFIED | `sst/opencode` `packages/core/src/v1/config/mcp.ts ConfigMCPV1.Local`; `packages/opencode/src/mcp/index.ts connectLocal()` | opencode does not use separate `args`/`env`; it splits the command array and reads `environment`. |
+
+INHERITED-UNVERIFIED is empty for the PR3 stdio adapter matrix.
 
 ---
 
