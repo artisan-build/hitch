@@ -1195,7 +1195,15 @@ func findCodexServer(raw []byte, path string, name string) (codexServerEntry, er
 		return codexServerEntry{}, nil
 	}
 	if name == "" {
-		return codexServerEntry{found: true, holdsCredential: serverHasCredential[expressions[found[0]].path[1]]}, nil
+		entry := codexServerEntry{found: true}
+		for _, i := range found {
+			root := expressions[i]
+			if serverHasCredential[root.path[1]] || root.holdsCredential {
+				entry.holdsCredential = true
+				break
+			}
+		}
+		return entry, nil
 	}
 	if len(found) > 1 {
 		return codexServerEntry{}, fmt.Errorf("existing Codex config %s has multiple mcp_servers entries named %q; cannot verify", path, name)
