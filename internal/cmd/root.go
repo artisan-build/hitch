@@ -104,6 +104,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	var dryRun bool
 	var tokenStdin bool
 	var tokenEnv string
+	var project bool
 	var headers []string
 	var name string
 	var forget bool
@@ -164,11 +165,15 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 					StdioEnv: parsedEnv,
 					Clients:  canonicalClients,
 					Yes:      yes,
+					Project:  project,
 					DryRun:   dryRun,
 					Forget:   forget,
 					NonTTY:   !isTerminal(cmd.InOrStdin()),
 					PickTargets: func(targets []install.Target, preferred map[string]bool) ([]install.Target, error) {
 						return pickTargets(args[0], targets, preferred)
+					},
+					ConfirmProjectWrite: func(path string) (bool, error) {
+						return confirmProjectCredentialWrite(path)
 					},
 					Env:    env,
 					Stdout: cmd.OutOrStdout(),
@@ -217,6 +222,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				Headers: parsedHeaders,
 				Clients: canonicalClients,
 				Yes:     yes,
+				Project: project,
 				DryRun:  dryRun,
 				Forget:  forget,
 				NonTTY:  !isTerminal(cmd.InOrStdin()),
@@ -227,6 +233,9 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				},
 				PickTargets: func(targets []install.Target, preferred map[string]bool) ([]install.Target, error) {
 					return pickTargets(normalizedURL, targets, preferred)
+				},
+				ConfirmProjectWrite: func(path string) (bool, error) {
+					return confirmProjectCredentialWrite(path)
 				},
 				Env:    env,
 				Stdout: cmd.OutOrStdout(),
@@ -249,6 +258,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	cmd.Flags().StringArrayVarP(&clients, "client", "c", nil, "target an explicit harness (repeatable)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "accept every detected harness without prompting")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print planned writes without changing files")
+	cmd.Flags().BoolVarP(&project, "project", "p", false, "write project-local MCP config paths")
 	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "read the bearer token from stdin")
 	cmd.Flags().StringVar(&tokenEnv, "token-env", "", "read the bearer token from an environment variable")
 	cmd.Flags().StringArrayVar(&headers, "header", nil, "additional HTTP header as 'K: V' (repeatable)")
@@ -394,6 +404,12 @@ var runInstallPicker = func(url string, options []huh.Option[string], selected *
 	return form.Run()
 }
 
+func confirmProjectCredentialWrite(path string) (bool, error) {
+	var ok bool
+	form := huh.NewForm(huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Project config %s is not gitignored and may store credentials. Write anyway?", path)).Value(&ok)))
+	return ok, form.Run()
+}
+
 type uninstallPickerOption struct {
 	ID    string
 	Label string
@@ -513,7 +529,8 @@ func printInstallSummary(out io.Writer, result install.Result, dryRun bool) erro
 }
 
 func newScanCommand(envFn func() (harness.Env, error)) *cobra.Command {
-	return &cobra.Command{
+	var project bool
+	cmd := &cobra.Command{
 		Use:   "scan [name]",
 		Short: "Scan client configs for a server entry",
 		Args: func(_ *cobra.Command, args []string) error {
@@ -531,13 +548,15 @@ func newScanCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			if len(args) == 1 {
 				name = args[0]
 			}
-			results, err := install.Scan(env, name, nil)
+			results, err := install.ScanScoped(env, name, nil, project)
 			if err != nil {
 				return err
 			}
 			return printScanResults(cmd.OutOrStdout(), results)
 		},
 	}
+	cmd.Flags().BoolVarP(&project, "project", "p", false, "scan project-local MCP config paths")
+	return cmd
 }
 
 func printScanResults(out io.Writer, results []install.ScanResult) error {
@@ -562,6 +581,7 @@ func printScanResults(out io.Writer, results []install.ScanResult) error {
 func newUninstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	var clients []string
 	var yes bool
+	var project bool
 	cmd := &cobra.Command{
 		Use:   "uninstall <name>",
 		Short: "Remove an MCP server from selected harnesses",
@@ -584,6 +604,7 @@ func newUninstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				Name:    args[0],
 				Clients: canonicalClients,
 				Yes:     yes,
+				Project: project,
 				NonTTY:  !isTerminal(cmd.InOrStdin()),
 				PickTargets: func(targets []install.ScanResult, unreadable []install.ScanResult) ([]install.ScanResult, error) {
 					return pickUninstallTargets(cmd.OutOrStdout(), args[0], targets, unreadable)
@@ -610,6 +631,7 @@ func newUninstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	}
 	cmd.Flags().StringArrayVarP(&clients, "client", "c", nil, "target an explicit harness (repeatable)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "remove from every config where the server is present without prompting")
+	cmd.Flags().BoolVarP(&project, "project", "p", false, "remove from project-local MCP config paths")
 	return cmd
 }
 

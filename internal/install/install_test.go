@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1186,6 +1187,217 @@ func TestScanDetectsCredentialWithoutPrintingIt(t *testing.T) {
 	}
 }
 
+func TestProjectInstallRemoteUsesProjectPaths(t *testing.T) {
+	t.Parallel()
+
+	project := t.TempDir()
+	for _, tt := range projectShapeCases(project) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			opts := baseOptions(projectEnv(project), tt.id)
+			opts.Project = true
+			res, err := InstallRemote(opts)
+			if err != nil {
+				t.Fatalf("InstallRemote returned error: %v", err)
+			}
+			if len(res.Written) != 1 || res.Written[0] != tt.path {
+				t.Fatalf("written paths = %#v, want %q", res.Written, tt.path)
+			}
+			if _, err := os.Stat(expectedPath(opts.Env.Home, tt.id)); !os.IsNotExist(err) {
+				t.Fatalf("project install wrote global path for %s, stat err = %v", tt.id, err)
+			}
+		})
+	}
+}
+
+func TestProjectInstallStdioUsesProjectPaths(t *testing.T) {
+	t.Parallel()
+
+	project := t.TempDir()
+	for _, tt := range projectShapeCases(project) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			opts := stdioOptions(projectEnv(project), tt.id)
+			opts.Project = true
+			res, err := InstallStdio(opts)
+			if err != nil {
+				t.Fatalf("InstallStdio returned error: %v", err)
+			}
+			if len(res.Written) != 1 || res.Written[0] != tt.path {
+				t.Fatalf("written paths = %#v, want %q", res.Written, tt.path)
+			}
+		})
+	}
+}
+
+func TestProjectScanAndUninstallUseProjectPaths(t *testing.T) {
+	t.Parallel()
+
+	project := t.TempDir()
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	writeFile(t, path, "{\"mcpServers\":{\"renamed\":{\"headers\":{\"Authorization\":\"Bearer PROJECT_SCAN_SECRET\"},\"url\":\"https://x.test/mcp\"}}}\n", 0o600)
+	globalPath := expectedPath(projectEnv(project).Home, "cursor")
+	writeFile(t, globalPath, "{\"mcpServers\":{\"renamed\":{\"headers\":{\"Authorization\":\"Bearer GLOBAL_SHOULD_STAY\"},\"url\":\"https://x.test/mcp\"}}}\n", 0o600)
+
+	scans, err := ScanScoped(projectEnv(project), "renamed", []string{"cursor"}, true)
+	if err != nil {
+		t.Fatalf("ScanScoped returned error: %v", err)
+	}
+	if len(scans) != 1 || scans[0].Path != path || scans[0].Status != ScanHasEntry || !scans[0].HoldsCredential {
+		t.Fatalf("project scan = %#v, want project cursor credential", scans)
+	}
+	res, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Project: true, Env: projectEnv(project)})
+	if err != nil || len(res.Removed) != 1 || res.Removed[0].Path != path {
+		t.Fatalf("Uninstall err = %v result = %#v, want project removal", err, res)
+	}
+	if strings.Contains(readFile(t, path), "renamed") {
+		t.Fatalf("project entry survived uninstall")
+	}
+	if !strings.Contains(readFile(t, globalPath), "GLOBAL_SHOULD_STAY") {
+		t.Fatalf("global config was changed by project uninstall")
+	}
+}
+
+func TestGitIgnoredProjectCredentialWriteDoesNotRequireConfirmation(t *testing.T) {
+	project := initGitRepo(t)
+	writeFile(t, filepath.Join(project, ".gitignore"), ".cursor/mcp.json\n", 0o600)
+	opts := baseOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = true
+	opts.ConfirmProjectWrite = func(string) (bool, error) {
+		t.Fatalf("ignored path should not request confirmation")
+		return false, nil
+	}
+	res, err := InstallRemote(opts)
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	if len(res.Written) != 1 || res.Written[0] != filepath.Join(project, ".cursor", "mcp.json") {
+		t.Fatalf("written = %#v, want ignored project cursor path", res.Written)
+	}
+}
+
+func TestUnignoredProjectCredentialWriteWarnsRefusesAndLeavesTargetAbsent(t *testing.T) {
+	project := initGitRepo(t)
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	oldIgnored := projectPathIgnored
+	projectPathIgnored = func(harness.Env, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { projectPathIgnored = oldIgnored })
+	var out strings.Builder
+	opts := baseOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = true
+	opts.Stdout = &out
+	res, err := InstallRemote(opts)
+	if err == nil || len(res.Failures) != 1 {
+		t.Fatalf("InstallRemote err = %v failures = %#v, want refusal", err, res.Failures)
+	}
+	if !strings.Contains(out.String(), "WARNING") || !strings.Contains(out.String(), path) || strings.Contains(out.String(), testToken) {
+		t.Fatalf("warning output = %q, want path-only warning", out.String())
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("refused project write created target, stat err = %v", statErr)
+	}
+}
+
+func TestDeclinedProjectCredentialWriteLeavesExistingTargetByteIdentical(t *testing.T) {
+	project := initGitRepo(t)
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	oldIgnored := projectPathIgnored
+	projectPathIgnored = func(harness.Env, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { projectPathIgnored = oldIgnored })
+	before := "{\n  \"mcpServers\": {}\n}\n"
+	writeFile(t, path, before, 0o600)
+	opts := baseOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.ConfirmProjectWrite = func(got string) (bool, error) {
+		if got != path {
+			t.Fatalf("confirm path = %q, want %q", got, path)
+		}
+		return false, nil
+	}
+	_, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want declined write")
+	}
+	if got := readFile(t, path); !bytes.Equal([]byte(got), []byte(before)) {
+		t.Fatalf("declined write changed bytes\nbefore:%q\nafter:%q", before, got)
+	}
+}
+
+func TestGitCheckIgnoredCoversGitIgnoreBoundary(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, project string) string
+		want  bool
+	}{
+		{name: "root gitignore", setup: func(t *testing.T, project string) string {
+			writeFile(t, filepath.Join(project, ".gitignore"), ".cursor/mcp.json\n", 0o600)
+			return filepath.Join(project, ".cursor", "mcp.json")
+		}, want: true},
+		{name: "nested gitignore", setup: func(t *testing.T, project string) string {
+			writeFile(t, filepath.Join(project, ".cursor", ".gitignore"), "mcp.json\n", 0o600)
+			return filepath.Join(project, ".cursor", "mcp.json")
+		}, want: true},
+		{name: "negated pattern is not ignored", setup: func(t *testing.T, project string) string {
+			writeFile(t, filepath.Join(project, ".gitignore"), "*\n!.cursor/\n!.cursor/mcp.json\n", 0o600)
+			return filepath.Join(project, ".cursor", "mcp.json")
+		}},
+		{name: "info exclude", setup: func(t *testing.T, project string) string {
+			writeFile(t, filepath.Join(project, ".git", "info", "exclude"), ".vscode/mcp.json\n", 0o600)
+			return filepath.Join(project, ".vscode", "mcp.json")
+		}, want: true},
+		{name: "global excludes file", setup: func(t *testing.T, project string) string {
+			globalIgnore := filepath.Join(project, "global-ignore")
+			writeFile(t, globalIgnore, "opencode.json\n", 0o600)
+			runGit(t, project, "config", "core.excludesFile", globalIgnore)
+			return filepath.Join(project, "opencode.json")
+		}, want: true},
+		{name: "not ignored", setup: func(t *testing.T, project string) string {
+			return filepath.Join(project, ".gemini", "settings.json")
+		}},
+		{name: "tracked beats ignored", setup: func(t *testing.T, project string) string {
+			path := filepath.Join(project, ".cursor", "mcp.json")
+			writeFile(t, filepath.Join(project, ".gitignore"), ".cursor/mcp.json\n", 0o600)
+			writeFile(t, path, "{}\n", 0o600)
+			runGit(t, project, "add", "-f", ".cursor/mcp.json")
+			return path
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := initGitRepo(t)
+			path := tt.setup(t, project)
+			got, err := gitCheckIgnored(projectEnv(project), path)
+			if err != nil {
+				t.Fatalf("gitCheckIgnored returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("gitCheckIgnored(%s) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGitCheckIgnoredTreatsNonGitRepositoryAsNotIgnored(t *testing.T) {
+	t.Parallel()
+
+	project := t.TempDir()
+	ignored, err := gitCheckIgnored(projectEnv(project), filepath.Join(project, ".cursor", "mcp.json"))
+	if err != nil {
+		t.Fatalf("gitCheckIgnored returned error: %v", err)
+	}
+	if ignored {
+		t.Fatalf("non-git directory reported ignored")
+	}
+}
+
 func baseOptions(env harness.Env, clientIDs ...string) Options {
 	return Options{
 		URL:     testURL,
@@ -1195,6 +1407,40 @@ func baseOptions(env harness.Env, clientIDs ...string) Options {
 		Yes:     true,
 		NonTTY:  true,
 		Env:     env,
+	}
+}
+
+func projectEnv(project string) harness.Env {
+	env := testEnv(filepath.Join(project, "home"))
+	env.WorkDir = project
+	return env
+}
+
+func projectShapeCases(project string) []shapeCase {
+	return []shapeCase{
+		{id: "claude-code", key: "mcpServers", path: filepath.Join(project, ".mcp.json")},
+		{id: "cursor", key: "mcpServers", path: filepath.Join(project, ".cursor", "mcp.json")},
+		{id: "zed", key: "context_servers", path: filepath.Join(project, ".zed", "settings.json")},
+		{id: "vscode", key: "servers", path: filepath.Join(project, ".vscode", "mcp.json")},
+		{id: "gemini-cli", key: "mcpServers", path: filepath.Join(project, ".gemini", "settings.json")},
+		{id: "opencode", key: "mcp", path: filepath.Join(project, "opencode.json")},
+	}
+}
+
+func initGitRepo(t *testing.T) string {
+	t.Helper()
+	project := t.TempDir()
+	runGit(t, project, "init", "-q")
+	return project
+}
+
+func runGit(t *testing.T, project string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = project
+	cmd.Env = gitEnvWithoutWorktreeOverrides(os.Environ())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
 
