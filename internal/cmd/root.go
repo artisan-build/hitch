@@ -390,18 +390,33 @@ func pickTargets(url string, targets []install.Target, preferred map[string]bool
 	return targetsBySelectedIDs(targets, selected), nil
 }
 
+type uninstallPickerOption struct {
+	ID    string
+	Label string
+}
+
+func uninstallPickerModel(targets []install.ScanResult, unreadable []install.ScanResult) ([]uninstallPickerOption, []string) {
+	warnings := make([]string, 0, len(unreadable))
+	for _, result := range unreadable {
+		warnings = append(warnings, fmt.Sprintf("[!] %s\t%s\t(unreadable - cannot verify)", result.Client.Name, result.Path))
+	}
+	model := make([]uninstallPickerOption, 0, len(targets))
+	for _, target := range targets {
+		model = append(model, uninstallPickerOption{ID: target.Client.ID, Label: fmt.Sprintf("%s\t%s\t(%s)", target.Client.Name, target.Path, credentialLabel(target.HoldsCredential))})
+	}
+	return model, warnings
+}
+
 func pickUninstallTargets(out io.Writer, name string, targets []install.ScanResult, unreadable []install.ScanResult) ([]install.ScanResult, error) {
-	if len(unreadable) > 0 {
-		for _, result := range unreadable {
-			_, _ = fmt.Fprintf(out, "[!] %s\t%s\t(unreadable - cannot verify)\n", result.Client.Name, result.Path)
-		}
+	model, warnings := uninstallPickerModel(targets, unreadable)
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintln(out, warning)
 	}
 	selected := make([]string, 0, len(targets))
-	options := make([]huh.Option[string], 0, len(targets))
-	for _, target := range targets {
-		selected = append(selected, target.Client.ID)
-		label := fmt.Sprintf("%s\t%s\t(%s)", target.Client.Name, target.Path, credentialLabel(target.HoldsCredential))
-		options = append(options, huh.NewOption(label, target.Client.ID))
+	options := make([]huh.Option[string], 0, len(model))
+	for _, option := range model {
+		selected = append(selected, option.ID)
+		options = append(options, huh.NewOption(option.Label, option.ID))
 	}
 	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title(fmt.Sprintf("Remove %q from which harnesses?", name)).Options(options...).Value(&selected)))
 	if err := form.Run(); err != nil {
@@ -521,6 +536,9 @@ func printScanResults(out io.Writer, results []install.ScanResult) error {
 			status = "has entry (" + credentialLabel(result.HoldsCredential) + ")"
 		case install.ScanUnreadable:
 			status = "UNREADABLE - cannot verify"
+			if result.Client.ID == "codex" {
+				status += " (hitch cannot configure Codex automatically yet; cannot verify or remove Codex config)"
+			}
 		}
 		if _, err := fmt.Fprintf(out, "%s\t%s\t%s\n", result.Client.Name, result.Path, status); err != nil {
 			return err
@@ -560,14 +578,20 @@ func newUninstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				},
 				Env: env,
 			})
-			if summaryErr := printUninstallSummary(cmd.OutOrStdout(), result); summaryErr != nil {
-				return summaryErr
-			}
 			if err != nil {
+				if result.Name == "" {
+					return err
+				}
 				if strings.Contains(err.Error(), "non-TTY uninstall") {
 					return exitError{err: err, code: 2}
 				}
+				if summaryErr := printUninstallSummary(cmd.OutOrStdout(), result); summaryErr != nil {
+					return summaryErr
+				}
 				return silentExitError{err: err, code: 1}
+			}
+			if summaryErr := printUninstallSummary(cmd.OutOrStdout(), result); summaryErr != nil {
+				return summaryErr
 			}
 			return nil
 		},
@@ -583,13 +607,22 @@ func printUninstallSummary(out io.Writer, result install.UninstallResult) error 
 			return err
 		}
 	}
-	if len(result.Removed) == 0 {
+	for _, kept := range result.Kept {
+		if _, err := fmt.Fprintf(out, "Kept %s %q (%s, %s)\n", kept.Client.Name, result.Name, kept.Path, credentialLabel(kept.HoldsCredential)); err != nil {
+			return err
+		}
+	}
+	if len(result.Removed) == 0 && len(result.Kept) == 0 {
 		if _, err := fmt.Fprintf(out, "No matching %q entries removed\n", result.Name); err != nil {
 			return err
 		}
 	}
 	for _, unreadable := range result.Unreadable {
-		if _, err := fmt.Fprintf(out, "UNREADABLE - cannot verify: %s (%s)\n", unreadable.Client.Name, unreadable.Path); err != nil {
+		detail := ""
+		if unreadable.Client.ID == "codex" {
+			detail = " - hitch cannot configure Codex automatically yet; cannot verify or remove Codex config"
+		}
+		if _, err := fmt.Fprintf(out, "UNREADABLE - cannot verify: %s (%s)%s\n", unreadable.Client.Name, unreadable.Path, detail); err != nil {
 			return err
 		}
 	}

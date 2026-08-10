@@ -62,8 +62,21 @@ type UninstallOptions struct {
 type UninstallResult struct {
 	Name       string
 	Removed    []ScanResult
+	Kept       []ScanResult
 	NotPresent []ScanResult
 	Unreadable []ScanResult
+}
+
+func ValidateLookupName(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	sanitized := sanitizeName(trimmed)
+	if sanitized == "" {
+		return "", fmt.Errorf("server name %q is invalid after sanitizing; provide a name with letters or numbers", name)
+	}
+	if trimmed != sanitized {
+		return "", fmt.Errorf("server name %q does not match hitch's stored key %q; rerun with the exact stored key or reinstall with a safe name", name, sanitized)
+	}
+	return sanitized, nil
 }
 
 type Options struct {
@@ -162,7 +175,11 @@ func AdapterByClientID(id string) (Adapter, bool) {
 
 func Scan(env harness.Env, name string, clientIDs []string) ([]ScanResult, error) {
 	if name != "" {
-		name = sanitizeName(name)
+		var err error
+		name, err = ValidateLookupName(name)
+		if err != nil {
+			return nil, err
+		}
 	}
 	selected := map[string]bool{}
 	for _, id := range clientIDs {
@@ -176,6 +193,12 @@ func Scan(env harness.Env, name string, clientIDs []string) ([]ScanResult, error
 	for _, detected := range results {
 		adapter, ok := AdapterByClientID(detected.ID)
 		if !ok {
+			if detected.ID == "codex" {
+				if len(selected) > 0 && !selected[detected.ID] {
+					continue
+				}
+				out = append(out, scanCodex(detected))
+			}
 			continue
 		}
 		if len(selected) > 0 && !selected[detected.ID] {
@@ -191,6 +214,22 @@ func Scan(env harness.Env, name string, clientIDs []string) ([]ScanResult, error
 		}
 	}
 	return out, nil
+}
+
+func scanCodex(client harness.DetectionResult) ScanResult {
+	result := ScanResult{Client: client, Path: client.ConfigPath, Status: ScanNoEntry}
+	raw, existed, err := readExisting(client.ConfigPath)
+	if err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	if !existed || len(bytes.TrimSpace(raw)) == 0 {
+		return result
+	}
+	result.Status = ScanUnreadable
+	result.Detail = "hitch cannot configure Codex automatically yet; cannot verify or remove Codex config"
+	return result
 }
 
 func scanOne(client harness.DetectionResult, adapter Adapter, name string) ScanResult {
@@ -231,6 +270,19 @@ func scanOne(client harness.DetectionResult, adapter Adapter, name string) ScanR
 		result.Detail = fmt.Sprintf("existing config %s has non-object %q", client.ConfigPath, adapter.ConfigKey)
 		return result
 	}
+	keyRange, found, err := findTopLevelObjectValue(raw, adapter.ConfigKey)
+	if err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	if found {
+		if err := rejectDuplicateObjectKeys(raw[keyRange.start:keyRange.end], client.ConfigPath, adapter.ConfigKey); err != nil {
+			result.Status = ScanUnreadable
+			result.Detail = err.Error()
+			return result
+		}
+	}
 	if name == "" {
 		if len(servers) == 0 {
 			return result
@@ -249,9 +301,9 @@ func scanOne(client harness.DetectionResult, adapter Adapter, name string) ScanR
 }
 
 func Uninstall(opts UninstallOptions) (UninstallResult, error) {
-	name := sanitizeName(opts.Name)
-	if name == "" {
-		return UninstallResult{}, fmt.Errorf("uninstall requires a non-empty server name")
+	name, nameErr := ValidateLookupName(opts.Name)
+	if nameErr != nil {
+		return UninstallResult{}, nameErr
 	}
 	res := UninstallResult{Name: name}
 	scans, err := Scan(opts.Env, name, opts.Clients)
@@ -280,6 +332,15 @@ func Uninstall(opts UninstallOptions) (UninstallResult, error) {
 		selected, err = opts.PickTargets(present, res.Unreadable)
 		if err != nil {
 			return res, err
+		}
+		selectedIDs := map[string]bool{}
+		for _, target := range selected {
+			selectedIDs[target.Client.ID] = true
+		}
+		for _, target := range present {
+			if !selectedIDs[target.Client.ID] {
+				res.Kept = append(res.Kept, target)
+			}
 		}
 	}
 	for _, target := range selected {
@@ -701,6 +762,10 @@ func jsonConfigError(path string, zedHint bool, err error) string {
 }
 
 func rejectDuplicateTopLevelKeys(raw []byte, path string) error {
+	return rejectDuplicateObjectKeys(raw, path, "top-level object")
+}
+
+func rejectDuplicateObjectKeys(raw []byte, path string, label string) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()
 	if err != nil {
@@ -721,7 +786,7 @@ func rejectDuplicateTopLevelKeys(raw []byte, path string) error {
 			return nil
 		}
 		if seen[key] {
-			return fmt.Errorf("existing config %s has duplicate top-level key %q", path, key)
+			return fmt.Errorf("existing config %s has duplicate key %q in %s", path, key, label)
 		}
 		seen[key] = true
 		var value json.RawMessage
@@ -807,6 +872,9 @@ func buildJSONRemoval(path string, key string, zedHint bool, name string) ([]byt
 	}
 	keyRange, found, err := findTopLevelObjectValue(raw, key)
 	if err != nil || !found {
+		return nil, false, err
+	}
+	if err := rejectDuplicateObjectKeys(raw[keyRange.start:keyRange.end], path, key); err != nil {
 		return nil, false, err
 	}
 	serverRange, serverFound, err := findTopLevelObjectMemberInRange(raw, name, keyRange)
@@ -964,9 +1032,51 @@ func removeObjectMember(raw []byte, objectRange byteRange, memberRange byteRange
 		after++
 	}
 	if after < objectRange.end-1 && raw[after] == ',' {
-		return replaceRange(raw, memberRange.start, after+1, nil), nil
+		start := lineStartIfOnlyIndent(raw, objectRange, memberRange.start)
+		end := after + 1
+		if lineEnd := followingLineBreakEnd(raw, end, objectRange.end); lineEnd > end {
+			end = lineEnd
+		}
+		return replaceRange(raw, start, end, nil), nil
 	}
-	return replaceRange(raw, memberRange.start, memberRange.end, nil), nil
+	start := lineStartIfOnlyIndent(raw, objectRange, memberRange.start)
+	end := memberRange.end
+	if lineEnd := followingLineBreakEnd(raw, end, objectRange.end); lineEnd > end {
+		end = lineEnd
+	}
+	return replaceRange(raw, start, end, nil), nil
+}
+
+func lineStartIfOnlyIndent(raw []byte, objectRange byteRange, pos int) int {
+	lineStart := pos
+	for lineStart > objectRange.start+1 && raw[lineStart-1] != '\n' && raw[lineStart-1] != '\r' {
+		lineStart--
+	}
+	for i := lineStart; i < pos; i++ {
+		if raw[i] != ' ' && raw[i] != '\t' {
+			return pos
+		}
+	}
+	return lineStart
+}
+
+func followingLineBreakEnd(raw []byte, pos int, limit int) int {
+	for i := pos; i < limit; i++ {
+		switch raw[i] {
+		case ' ', '\t':
+			continue
+		case '\r':
+			if i+1 < limit && raw[i+1] == '\n' {
+				return i + 2
+			}
+			return i + 1
+		case '\n':
+			return i + 1
+		default:
+			return pos
+		}
+	}
+	return pos
 }
 
 func findTopLevelObjectValueInSection(raw []byte, key string) (byteRange, bool, error) {

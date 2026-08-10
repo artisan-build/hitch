@@ -706,7 +706,7 @@ func TestDuplicateTopLevelConfigKeyRefusedAndUnchanged(t *testing.T) {
 	raw := "{\n  \"mcpServers\": {},\n  \"mcpServers\": {}\n}\n"
 	writeFile(t, path, raw, 0o600)
 	_, err := InstallRemote(baseOptions(testEnv(home), "cursor"))
-	if err == nil || !strings.Contains(err.Error(), "duplicate top-level key") {
+	if err == nil || !strings.Contains(err.Error(), "duplicate key") || !strings.Contains(err.Error(), "top-level object") {
 		t.Fatalf("InstallRemote error = %v, want duplicate key", err)
 	}
 	if got := readFile(t, path); got != raw {
@@ -881,6 +881,84 @@ func TestInstallThenUninstallLeavesForeignConfigByteIdentical(t *testing.T) {
 	}
 }
 
+func TestUninstallForeignEntryMatchesLiteralExpectedBytes(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		before string
+		after  string
+	}{
+		{
+			name:   "non-last member",
+			before: "{\n  \"mcpServers\": {\n    \"x\": {\"url\": \"https://x.test/mcp\", \"headers\": {\"Authorization\": \"Bearer FOREIGN\"}},\n    \"keep\": {\"url\": \"https://keep.test/mcp\"}\n  },\n  \"other\": true\n}\n",
+			after:  "{\n  \"mcpServers\": {\n    \"keep\": {\"url\": \"https://keep.test/mcp\"}\n  },\n  \"other\": true\n}\n",
+		},
+		{
+			name:   "last member",
+			before: "{\n  \"mcpServers\": {\n    \"keep\": {\"url\": \"https://keep.test/mcp\"},\n    \"x\": {\"url\": \"https://x.test/mcp\", \"headers\": {\"Authorization\": \"Bearer FOREIGN\"}}\n  },\n  \"other\": true\n}\n",
+			after:  "{\n  \"mcpServers\": {\n    \"keep\": {\"url\": \"https://keep.test/mcp\"}\n  },\n  \"other\": true\n}\n",
+		},
+		{
+			name:   "only member",
+			before: "{\n  \"mcpServers\": {\n    \"x\": {\"url\": \"https://x.test/mcp\", \"headers\": {\"Authorization\": \"Bearer FOREIGN\"}}\n  },\n  \"other\": true\n}\n",
+			after:  "{\n  \"mcpServers\": {\n  },\n  \"other\": true\n}\n",
+		},
+		{
+			name:   "first member",
+			before: "{\n  \"mcpServers\": {\n    \"x\": {\"url\": \"https://x.test/mcp\", \"headers\": {\"Authorization\": \"Bearer FOREIGN\"}},\n    \"middle\": {\"url\": \"https://middle.test/mcp\"},\n    \"keep\": {\"url\": \"https://keep.test/mcp\"}\n  },\n  \"other\": true\n}\n",
+			after:  "{\n  \"mcpServers\": {\n    \"middle\": {\"url\": \"https://middle.test/mcp\"},\n    \"keep\": {\"url\": \"https://keep.test/mcp\"}\n  },\n  \"other\": true\n}\n",
+		},
+		{
+			name:   "tab indentation",
+			before: "{\n\t\"mcpServers\": {\n\t\t\"x\": {\"url\": \"https://x.test/mcp\", \"headers\": {\"Authorization\": \"Bearer FOREIGN\"}},\n\t\t\"keep\": {\"url\": \"https://keep.test/mcp\"}\n\t},\n\t\"other\": true\n}\n",
+			after:  "{\n\t\"mcpServers\": {\n\t\t\"keep\": {\"url\": \"https://keep.test/mcp\"}\n\t},\n\t\"other\": true\n}\n",
+		},
+		{
+			name:   "crlf",
+			before: "{\r\n  \"mcpServers\": {\r\n    \"x\": {\"url\": \"https://x.test/mcp\", \"headers\": {\"Authorization\": \"Bearer FOREIGN\"}},\r\n    \"keep\": {\"url\": \"https://keep.test/mcp\"}\r\n  },\r\n  \"other\": true\r\n}\r\n",
+			after:  "{\r\n  \"mcpServers\": {\r\n    \"keep\": {\"url\": \"https://keep.test/mcp\"}\r\n  },\r\n  \"other\": true\r\n}\r\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			path := expectedPath(home, "cursor")
+			writeFile(t, path, tt.before, 0o600)
+			res, err := Uninstall(UninstallOptions{Name: "x", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+			if err != nil || len(res.Removed) != 1 {
+				t.Fatalf("Uninstall err = %v removed = %#v", err, res.Removed)
+			}
+			if got := readFile(t, path); got != tt.after {
+				t.Fatalf("foreign removal bytes mismatch\nwant:\n%s\ngot:\n%s", tt.after, got)
+			}
+		})
+	}
+}
+
+func TestUninstallForeignEntryPreservesExpectedBytesForEveryClient(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range shapeCases(t.TempDir()) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			path := expectedPath(home, tt.id)
+			before := "{\n  \"z\": true,\n  \"" + tt.key + "\": {\n    \"x\": {\"url\": \"https://x.test/mcp\", \"headers\": {\"Authorization\": \"Bearer FOREIGN\"}},\n    \"keep\": {\"url\": \"https://keep.test/mcp\"}\n  },\n  \"a\": true\n}\n"
+			after := "{\n  \"z\": true,\n  \"" + tt.key + "\": {\n    \"keep\": {\"url\": \"https://keep.test/mcp\"}\n  },\n  \"a\": true\n}\n"
+			writeFile(t, path, before, 0o600)
+			res, err := Uninstall(UninstallOptions{Name: "x", Clients: []string{tt.id}, Yes: true, NonTTY: true, Env: testEnv(home)})
+			if err != nil || len(res.Removed) != 1 {
+				t.Fatalf("Uninstall err = %v removed = %#v", err, res.Removed)
+			}
+			if got := readFile(t, path); got != after {
+				t.Fatalf("%s foreign removal bytes mismatch\nwant:\n%s\ngot:\n%s", tt.id, after, got)
+			}
+		})
+	}
+}
+
 func TestUninstallLastServerLeavesValidEmptyServerMap(t *testing.T) {
 	t.Parallel()
 
@@ -937,6 +1015,127 @@ func TestScanAndUninstallTreatMalformedConfigAsUnreadableAndUnchanged(t *testing
 	}
 	if got := readFile(t, path); got != before {
 		t.Fatalf("malformed config changed to %q", got)
+	}
+}
+
+func TestDuplicateServerMapKeyIsUnreadableAndUnchanged(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	before := "{\"mcpServers\":{\"x\":{\"headers\":{\"Authorization\":\"Bearer DEAD\"}},\"keep\":{\"url\":\"https://keep.test/mcp\"},\"x\":{\"headers\":{\"Authorization\":\"Bearer LIVE\"}}}}"
+	writeFile(t, path, before, 0o600)
+	scans, err := Scan(testEnv(home), "x", []string{"cursor"})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(scans) != 1 || scans[0].Status != ScanUnreadable || !strings.Contains(scans[0].Detail, "duplicate key") {
+		t.Fatalf("scan = %#v, want unreadable duplicate-key outcome", scans)
+	}
+	res, err := Uninstall(UninstallOptions{Name: "x", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err == nil || len(res.Unreadable) != 1 || len(res.Removed) != 0 {
+		t.Fatalf("Uninstall err = %v result = %#v, want unreadable duplicate-key refusal", err, res)
+	}
+	if got := readFile(t, path); got != before {
+		t.Fatalf("duplicate-key config changed to %q", got)
+	}
+}
+
+func TestCodexScanAndUninstallAreExplicitlyUnverifiable(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	before := "[mcp_servers.x]\nurl = \"https://x.test/mcp\"\nbearer_token = \"CODEX_SECRET\"\n"
+	writeFile(t, path, before, 0o600)
+	scans, err := Scan(testEnv(home), "x", nil)
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	found := false
+	for _, scan := range scans {
+		if scan.Client.ID == "codex" {
+			found = true
+			if scan.Status != ScanUnreadable || !strings.Contains(scan.Detail, "Codex") {
+				t.Fatalf("Codex scan = %#v, want unreadable not-yet-implemented detail", scan)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("scan omitted Codex: %#v", scans)
+	}
+	res, err := Uninstall(UninstallOptions{Name: "x", Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err == nil || len(res.Unreadable) != 1 || res.Unreadable[0].Client.ID != "codex" {
+		t.Fatalf("Uninstall err = %v result = %#v, want Codex unreadable", err, res)
+	}
+	if got := readFile(t, path); got != before {
+		t.Fatalf("Codex config changed to %q", got)
+	}
+}
+
+func TestLookupNameThatSanitizesDifferentlyIsRefused(t *testing.T) {
+	t.Parallel()
+
+	if _, err := Scan(testEnv(t.TempDir()), "ZSentinel", []string{"cursor"}); err == nil || !strings.Contains(err.Error(), "exact stored key") {
+		t.Fatalf("Scan error = %v, want exact stored key refusal", err)
+	}
+	if _, err := Uninstall(UninstallOptions{Name: "ZSentinel", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(t.TempDir())}); err == nil || !strings.Contains(err.Error(), "exact stored key") {
+		t.Fatalf("Uninstall error = %v, want exact stored key refusal", err)
+	}
+}
+
+func TestInteractiveUninstallPickerReceivesUnreadableAndHonorsSelection(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	cursorPath := expectedPath(home, "cursor")
+	geminiPath := expectedPath(home, "gemini-cli")
+	zedPath := expectedPath(home, "zed")
+	writeFile(t, cursorPath, "{\"mcpServers\":{\"x\":{\"url\":\"https://x.test/mcp\",\"headers\":{\"Authorization\":\"Bearer CURSOR\"}}}}\n", 0o600)
+	writeFile(t, geminiPath, "{\"mcpServers\":{\"x\":{\"httpUrl\":\"https://x.test/mcp\",\"headers\":{\"Authorization\":\"Bearer GEMINI\"}}}}\n", 0o600)
+	writeFile(t, zedPath, "{not-json PICKER_UNREADABLE_SECRET", 0o600)
+	pickerCalled := false
+	res, err := Uninstall(UninstallOptions{
+		Name:   "x",
+		Yes:    false,
+		NonTTY: false,
+		Env:    testEnv(home),
+		PickTargets: func(targets []ScanResult, unreadable []ScanResult) ([]ScanResult, error) {
+			pickerCalled = true
+			if len(targets) != 2 {
+				t.Fatalf("selectable targets = %#v, want cursor and gemini only", targets)
+			}
+			for _, target := range targets {
+				if target.Client.ID == "zed" {
+					t.Fatalf("unreadable target was selectable: %#v", targets)
+				}
+			}
+			if len(unreadable) != 1 || unreadable[0].Client.ID != "zed" {
+				t.Fatalf("unreadable = %#v, want zed", unreadable)
+			}
+			for _, target := range targets {
+				if target.Client.ID == "cursor" {
+					return []ScanResult{target}, nil
+				}
+			}
+			t.Fatalf("cursor target missing: %#v", targets)
+			return nil, nil
+		},
+	})
+	if !pickerCalled {
+		t.Fatalf("picker was not called")
+	}
+	if err == nil || len(res.Unreadable) != 1 || len(res.Removed) != 1 || len(res.Kept) != 1 {
+		t.Fatalf("Uninstall err = %v result = %#v, want one removed, one kept, one unreadable", err, res)
+	}
+	if strings.Contains(readFile(t, cursorPath), "\"x\"") {
+		t.Fatalf("selected cursor entry was not removed")
+	}
+	if !strings.Contains(readFile(t, geminiPath), "Bearer GEMINI") {
+		t.Fatalf("deselected gemini entry was removed")
+	}
+	if !strings.Contains(readFile(t, zedPath), "PICKER_UNREADABLE_SECRET") {
+		t.Fatalf("unreadable zed config changed")
 	}
 }
 
