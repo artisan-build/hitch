@@ -34,6 +34,38 @@ type Target struct {
 	Path   string
 }
 
+type ScanStatus string
+
+const (
+	ScanHasEntry   ScanStatus = "has_entry"
+	ScanNoEntry    ScanStatus = "no_entry"
+	ScanUnreadable ScanStatus = "unreadable"
+)
+
+type ScanResult struct {
+	Client          harness.DetectionResult
+	Path            string
+	Status          ScanStatus
+	HoldsCredential bool
+	Detail          string
+}
+
+type UninstallOptions struct {
+	Name        string
+	Clients     []string
+	Yes         bool
+	NonTTY      bool
+	PickTargets func([]ScanResult, []ScanResult) ([]ScanResult, error)
+	Env         harness.Env
+}
+
+type UninstallResult struct {
+	Name       string
+	Removed    []ScanResult
+	NotPresent []ScanResult
+	Unreadable []ScanResult
+}
+
 type Options struct {
 	URL         string
 	Name        string
@@ -126,6 +158,152 @@ func AdapterByClientID(id string) (Adapter, bool) {
 		}
 	}
 	return Adapter{}, false
+}
+
+func Scan(env harness.Env, name string, clientIDs []string) ([]ScanResult, error) {
+	if name != "" {
+		name = sanitizeName(name)
+	}
+	selected := map[string]bool{}
+	for _, id := range clientIDs {
+		selected[id] = true
+	}
+	results, err := harness.Detect(env)
+	if err != nil {
+		return nil, err
+	}
+	out := []ScanResult{}
+	for _, detected := range results {
+		adapter, ok := AdapterByClientID(detected.ID)
+		if !ok {
+			continue
+		}
+		if len(selected) > 0 && !selected[detected.ID] {
+			continue
+		}
+		out = append(out, scanOne(detected, adapter, name))
+	}
+	if len(selected) > 0 && len(out) != len(selected) {
+		for id := range selected {
+			if _, ok := AdapterByClientID(id); !ok {
+				return nil, fmt.Errorf("unknown file-writer client %q", id)
+			}
+		}
+	}
+	return out, nil
+}
+
+func scanOne(client harness.DetectionResult, adapter Adapter, name string) ScanResult {
+	result := ScanResult{Client: client, Path: client.ConfigPath, Status: ScanNoEntry}
+	raw, existed, err := readExisting(client.ConfigPath)
+	if err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	if !existed || len(bytes.TrimSpace(raw)) == 0 {
+		return result
+	}
+	if err := rejectDuplicateTopLevelKeys(raw, client.ConfigPath); err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = err.Error()
+		return result
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		result.Status = ScanUnreadable
+		result.Detail = jsonConfigError(client.ConfigPath, adapter.ClientID == "zed", err)
+		return result
+	}
+	object, ok := decoded.(map[string]any)
+	if !ok {
+		result.Status = ScanUnreadable
+		result.Detail = fmt.Sprintf("existing config %s is not a JSON object", client.ConfigPath)
+		return result
+	}
+	serversRaw, ok := object[adapter.ConfigKey]
+	if !ok {
+		return result
+	}
+	servers, ok := serversRaw.(map[string]any)
+	if !ok {
+		result.Status = ScanUnreadable
+		result.Detail = fmt.Sprintf("existing config %s has non-object %q", client.ConfigPath, adapter.ConfigKey)
+		return result
+	}
+	if name == "" {
+		if len(servers) == 0 {
+			return result
+		}
+		result.Status = ScanHasEntry
+		result.HoldsCredential = holdsCredential(servers)
+		return result
+	}
+	entry, ok := servers[name]
+	if !ok {
+		return result
+	}
+	result.Status = ScanHasEntry
+	result.HoldsCredential = holdsCredential(entry)
+	return result
+}
+
+func Uninstall(opts UninstallOptions) (UninstallResult, error) {
+	name := sanitizeName(opts.Name)
+	if name == "" {
+		return UninstallResult{}, fmt.Errorf("uninstall requires a non-empty server name")
+	}
+	res := UninstallResult{Name: name}
+	scans, err := Scan(opts.Env, name, opts.Clients)
+	if err != nil {
+		return res, err
+	}
+	present := []ScanResult{}
+	for _, scan := range scans {
+		switch scan.Status {
+		case ScanHasEntry:
+			present = append(present, scan)
+		case ScanUnreadable:
+			res.Unreadable = append(res.Unreadable, scan)
+		default:
+			res.NotPresent = append(res.NotPresent, scan)
+		}
+	}
+	selected := present
+	if len(opts.Clients) == 0 && !opts.Yes {
+		if opts.NonTTY {
+			return res, fmt.Errorf("non-TTY uninstall requires either -y/--yes or -c/--client")
+		}
+		if opts.PickTargets == nil {
+			return res, fmt.Errorf("interactive picker is unavailable")
+		}
+		selected, err = opts.PickTargets(present, res.Unreadable)
+		if err != nil {
+			return res, err
+		}
+	}
+	for _, target := range selected {
+		adapter, ok := AdapterByClientID(target.Client.ID)
+		if !ok {
+			return res, fmt.Errorf("unknown file-writer client %q", target.Client.ID)
+		}
+		changed, err := RemoveEntry(target.Path, adapter, name)
+		if err != nil {
+			target.Status = ScanUnreadable
+			target.Detail = err.Error()
+			res.Unreadable = append(res.Unreadable, target)
+			continue
+		}
+		if changed {
+			res.Removed = append(res.Removed, target)
+		} else {
+			res.NotPresent = append(res.NotPresent, target)
+		}
+	}
+	if len(res.Unreadable) > 0 {
+		return res, fmt.Errorf("could not verify %d config file(s)", len(res.Unreadable))
+	}
+	return res, nil
 }
 
 func InferName(rawURL string) (string, bool, error) {
@@ -496,11 +674,7 @@ func buildJSONEntry(path string, key string, zedHint bool, name string, entry ma
 	}
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		hint := ""
-		if zedHint {
-			hint = " Zed settings may contain JSONC comments; remove comments before retrying."
-		}
-		return nil, fmt.Errorf("existing config %s is not valid JSON (%v); fix or remove it, then retry.%s", path, err, hint)
+		return nil, errors.New(jsonConfigError(path, zedHint, err))
 	}
 	object, ok := decoded.(map[string]any)
 	if !ok {
@@ -516,6 +690,14 @@ func buildJSONEntry(path string, key string, zedHint bool, name string, entry ma
 		return nil, err
 	}
 	return updated, nil
+}
+
+func jsonConfigError(path string, zedHint bool, err error) string {
+	hint := ""
+	if zedHint {
+		hint = " Zed settings may contain JSONC comments; remove comments before retrying."
+	}
+	return fmt.Sprintf("existing config %s is not valid JSON (%v); fix or remove it, then retry.%s", path, err, hint)
 }
 
 func rejectDuplicateTopLevelKeys(raw []byte, path string) error {
@@ -594,6 +776,50 @@ func setJSONObjectEntry(raw []byte, key string, name string, entry map[string]an
 	return insertIntoObject(raw, keyRange.start, keyRange.end, name, serverObject)
 }
 
+func RemoveEntry(path string, adapter Adapter, name string) (bool, error) {
+	content, changed, err := buildJSONRemoval(path, adapter.ConfigKey, adapter.ClientID == "zed", name)
+	if err != nil || !changed {
+		return changed, err
+	}
+	return true, writeAtomic(path, content)
+}
+
+func buildJSONRemoval(path string, key string, zedHint bool, name string) ([]byte, bool, error) {
+	raw, existed, err := readExisting(path)
+	if err != nil || !existed || len(bytes.TrimSpace(raw)) == 0 {
+		return nil, false, err
+	}
+	if err := rejectDuplicateTopLevelKeys(raw, path); err != nil {
+		return nil, false, err
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil, false, errors.New(jsonConfigError(path, zedHint, err))
+	}
+	object, ok := decoded.(map[string]any)
+	if !ok {
+		return nil, false, fmt.Errorf("existing config %s is not a JSON object", path)
+	}
+	if servers, ok := object[key]; ok {
+		if _, ok := servers.(map[string]any); !ok {
+			return nil, false, fmt.Errorf("existing config %s has non-object %q", path, key)
+		}
+	}
+	keyRange, found, err := findTopLevelObjectValue(raw, key)
+	if err != nil || !found {
+		return nil, false, err
+	}
+	serverRange, serverFound, err := findTopLevelObjectMemberInRange(raw, name, keyRange)
+	if err != nil || !serverFound {
+		return nil, false, err
+	}
+	updated, err := removeObjectMember(raw, keyRange, serverRange)
+	if err != nil {
+		return nil, false, err
+	}
+	return updated, true, nil
+}
+
 type byteRange struct{ start, end int }
 
 func findTopLevelObjectValue(raw []byte, key string) (byteRange, bool, error) {
@@ -611,6 +837,153 @@ func findTopLevelObjectValueInRange(raw []byte, key string, bounds byteRange) (b
 		return byteRange{}, found, err
 	}
 	return byteRange{start: base + span.start, end: base + span.end}, true, nil
+}
+
+func findTopLevelObjectMemberInRange(raw []byte, key string, bounds byteRange) (byteRange, bool, error) {
+	if bounds.start < 0 || bounds.end > len(raw) || bounds.start >= bounds.end {
+		return byteRange{}, false, errors.New("invalid JSON object range")
+	}
+	base := bounds.start
+	section := raw[bounds.start:bounds.end]
+	span, found, err := findTopLevelObjectMemberInSection(section, key)
+	if err != nil || !found {
+		return byteRange{}, found, err
+	}
+	return byteRange{start: base + span.start, end: base + span.end}, true, nil
+}
+
+func findTopLevelObjectMemberInSection(raw []byte, key string) (byteRange, bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return byteRange{}, false, err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return byteRange{}, false, errors.New("existing config is not a JSON object")
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return byteRange{}, false, err
+		}
+		keyString, ok := keyTok.(string)
+		if !ok {
+			return byteRange{}, false, errors.New("JSON object key is not a string")
+		}
+		keyEnd := int(dec.InputOffset())
+		keyStart, err := jsonStringStart(raw, keyEnd-1)
+		if err != nil {
+			return byteRange{}, false, err
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return byteRange{}, false, err
+		}
+		valueEnd := int(dec.InputOffset())
+		if keyString == key {
+			return byteRange{start: keyStart, end: valueEnd}, true, nil
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return byteRange{}, false, err
+	}
+	return byteRange{}, false, nil
+}
+
+func jsonStringStart(raw []byte, endQuote int) (int, error) {
+	for i := endQuote; i >= 0; i-- {
+		if raw[i] != '"' {
+			continue
+		}
+		backslashes := 0
+		for j := i - 1; j >= 0 && raw[j] == '\\'; j-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			return i, nil
+		}
+	}
+	return 0, errors.New("could not locate JSON object key start")
+}
+
+func removeObjectMember(raw []byte, objectRange byteRange, memberRange byteRange) ([]byte, error) {
+	if objectRange.start < 0 || objectRange.end > len(raw) || memberRange.start < objectRange.start || memberRange.end > objectRange.end {
+		return nil, errors.New("invalid JSON removal range")
+	}
+	before := memberRange.start
+	for before > objectRange.start+1 && isSpace(raw[before-1]) {
+		before--
+	}
+	if before > objectRange.start+1 && raw[before-1] == ',' {
+		return replaceRange(raw, before-1, memberRange.end, nil), nil
+	}
+	after := memberRange.end
+	for after < objectRange.end-1 && isSpace(raw[after]) {
+		after++
+	}
+	if after < objectRange.end-1 && raw[after] == ',' {
+		lineStart := memberRange.start
+		for lineStart > objectRange.start+1 && raw[lineStart-1] != '\n' && raw[lineStart-1] != '\r' {
+			lineStart--
+		}
+		return replaceRange(raw, lineStart, after+1, nil), nil
+	}
+	lineStart := memberRange.start
+	for lineStart > objectRange.start+1 && raw[lineStart-1] != '\n' && raw[lineStart-1] != '\r' {
+		lineStart--
+	}
+	lineEnd := memberRange.end
+	for lineEnd < objectRange.end-1 && raw[lineEnd] != '\n' && raw[lineEnd] != '\r' {
+		lineEnd++
+	}
+	if lineEnd < objectRange.end-1 {
+		lineEnd++
+	}
+	return replaceRange(raw, lineStart, lineEnd, nil), nil
+}
+
+func holdsCredential(v any) bool {
+	switch typed := v.(type) {
+	case map[string]any:
+		for key, value := range typed {
+			if credentialContainerKey(key) && mapHasStringValue(value) {
+				return true
+			}
+			if holdsCredential(value) {
+				return true
+			}
+		}
+	case []any:
+		for _, value := range typed {
+			if holdsCredential(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func credentialContainerKey(key string) bool {
+	return strings.EqualFold(key, "headers") || strings.EqualFold(key, "env") || strings.EqualFold(key, "environment")
+}
+
+func mapHasStringValue(v any) bool {
+	switch typed := v.(type) {
+	case map[string]any:
+		for _, value := range typed {
+			if s, ok := value.(string); ok && s != "" {
+				return true
+			}
+		}
+	case map[string]string:
+		for _, value := range typed {
+			if value != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func findTopLevelObjectValueInSection(raw []byte, key string) (byteRange, bool, error) {

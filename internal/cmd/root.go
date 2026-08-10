@@ -36,6 +36,9 @@ func NewRootCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newListCommand(envFn))
 	root.AddCommand(newInstallCommand(envFn))
+	root.AddCommand(newScanCommand(envFn))
+	root.AddCommand(newUninstallCommand(envFn))
+	root.AddCommand(newPromptCommand())
 
 	return root
 }
@@ -387,6 +390,43 @@ func pickTargets(url string, targets []install.Target, preferred map[string]bool
 	return targetsBySelectedIDs(targets, selected), nil
 }
 
+func pickUninstallTargets(out io.Writer, name string, targets []install.ScanResult, unreadable []install.ScanResult) ([]install.ScanResult, error) {
+	if len(unreadable) > 0 {
+		for _, result := range unreadable {
+			_, _ = fmt.Fprintf(out, "[!] %s\t%s\t(unreadable - cannot verify)\n", result.Client.Name, result.Path)
+		}
+	}
+	selected := make([]string, 0, len(targets))
+	options := make([]huh.Option[string], 0, len(targets))
+	for _, target := range targets {
+		selected = append(selected, target.Client.ID)
+		label := fmt.Sprintf("%s\t%s\t(%s)", target.Client.Name, target.Path, credentialLabel(target.HoldsCredential))
+		options = append(options, huh.NewOption(label, target.Client.ID))
+	}
+	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title(fmt.Sprintf("Remove %q from which harnesses?", name)).Options(options...).Value(&selected)))
+	if err := form.Run(); err != nil {
+		return nil, err
+	}
+	chosenIDs := map[string]bool{}
+	for _, id := range selected {
+		chosenIDs[id] = true
+	}
+	chosen := make([]install.ScanResult, 0, len(selected))
+	for _, target := range targets {
+		if chosenIDs[target.Client.ID] {
+			chosen = append(chosen, target)
+		}
+	}
+	return chosen, nil
+}
+
+func credentialLabel(holds bool) string {
+	if holds {
+		return "holds a credential"
+	}
+	return "no credential"
+}
+
 func defaultSelectedTargetIDs(targets []install.Target, preferred map[string]bool) []string {
 	selected := []string{}
 	for _, target := range targets {
@@ -443,6 +483,142 @@ func printInstallSummary(out io.Writer, result install.Result, dryRun bool) erro
 		}
 	}
 	return nil
+}
+
+func newScanCommand(envFn func() (harness.Env, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:   "scan [name]",
+		Short: "Scan client configs for a server entry",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) > 1 {
+				return exitError{err: fmt.Errorf("scan accepts at most one server name"), code: 2}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			env, err := envFn()
+			if err != nil {
+				return err
+			}
+			name := ""
+			if len(args) == 1 {
+				name = args[0]
+			}
+			results, err := install.Scan(env, name, nil)
+			if err != nil {
+				return err
+			}
+			return printScanResults(cmd.OutOrStdout(), results)
+		},
+	}
+}
+
+func printScanResults(out io.Writer, results []install.ScanResult) error {
+	for _, result := range results {
+		status := "no entry"
+		switch result.Status {
+		case install.ScanHasEntry:
+			status = "has entry (" + credentialLabel(result.HoldsCredential) + ")"
+		case install.ScanUnreadable:
+			status = "UNREADABLE - cannot verify"
+		}
+		if _, err := fmt.Fprintf(out, "%s\t%s\t%s\n", result.Client.Name, result.Path, status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func newUninstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
+	var clients []string
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "uninstall <name>",
+		Short: "Remove an MCP server from selected harnesses",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return exitError{err: fmt.Errorf("uninstall requires <name>"), code: 2}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			env, err := envFn()
+			if err != nil {
+				return err
+			}
+			canonicalClients, err := normalizeClientIDs(clients)
+			if err != nil {
+				return exitError{err: err, code: 2}
+			}
+			result, err := install.Uninstall(install.UninstallOptions{
+				Name:    args[0],
+				Clients: canonicalClients,
+				Yes:     yes,
+				NonTTY:  !isTerminal(cmd.InOrStdin()),
+				PickTargets: func(targets []install.ScanResult, unreadable []install.ScanResult) ([]install.ScanResult, error) {
+					return pickUninstallTargets(cmd.OutOrStdout(), args[0], targets, unreadable)
+				},
+				Env: env,
+			})
+			if summaryErr := printUninstallSummary(cmd.OutOrStdout(), result); summaryErr != nil {
+				return summaryErr
+			}
+			if err != nil {
+				if strings.Contains(err.Error(), "non-TTY uninstall") {
+					return exitError{err: err, code: 2}
+				}
+				return silentExitError{err: err, code: 1}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringArrayVarP(&clients, "client", "c", nil, "target an explicit harness (repeatable)")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "remove from every config where the server is present without prompting")
+	return cmd
+}
+
+func printUninstallSummary(out io.Writer, result install.UninstallResult) error {
+	for _, removed := range result.Removed {
+		if _, err := fmt.Fprintf(out, "Removed %s %q (%s, %s)\n", removed.Client.Name, result.Name, removed.Path, credentialLabel(removed.HoldsCredential)); err != nil {
+			return err
+		}
+	}
+	if len(result.Removed) == 0 {
+		if _, err := fmt.Fprintf(out, "No matching %q entries removed\n", result.Name); err != nil {
+			return err
+		}
+	}
+	for _, unreadable := range result.Unreadable {
+		if _, err := fmt.Fprintf(out, "UNREADABLE - cannot verify: %s (%s)\n", unreadable.Client.Name, unreadable.Path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func newPromptCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "prompt <url>",
+		Short: "Print manual setup prompts for clients hitch does not write",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return exitError{err: fmt.Errorf("prompt requires <url>"), code: 2}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			url, err := install.NormalizeRemoteURL(args[0])
+			if err != nil {
+				return err
+			}
+			name, _, err := install.InferName(url)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Desktop: add a stdio MCP entry that runs mcp-remote for %s; hitch does not write it because remote HTTP requires a local proxy and Node runtime.\n\nJetBrains: add this MCP server through the JetBrains MCP UI for %s; hitch does not write it because the dialog has no Authorization-headers field.\n\nCodex: hitch cannot configure Codex automatically yet. Add this to Codex config manually:\n[mcp_servers.%s]\nurl = %q\nbearer_token_env_var = \"%s\"\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN\n", url, url, name, url, install.CodexTokenEnvVar(name), install.CodexTokenEnvVar(name))
+			return err
+		},
+	}
 }
 
 func isTerminal(in io.Reader) bool {

@@ -747,6 +747,103 @@ func TestInstallExitCodeIsOneWhenNoHarnessConfigured(t *testing.T) {
 	}
 }
 
+func TestScanCLIReportsThreeOutcomesAndDoesNotPrintToken(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{\"mcpServers\": {\"example\": {\"headers\": {\"Authorization\": \"Bearer SCAN_CLI_SECRET\"}, \"url\": \"https://mcp.example.test/mcp\"}}}\n", 0o600)
+	writeFile(t, filepath.Join(home, ".gemini", "settings.json"), "{not-json SCAN_PARSE_SECRET", 0o600)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"scan", "example"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{"Cursor\t" + filepath.Join(home, ".cursor", "mcp.json") + "\thas entry (holds a credential)", "Claude Code\t" + filepath.Join(home, ".claude.json") + "\tno entry", "Gemini CLI\t" + filepath.Join(home, ".gemini", "settings.json") + "\tUNREADABLE - cannot verify"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("scan output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "SCAN_CLI_SECRET") || strings.Contains(stdout.String()+stderr.String(), "SCAN_PARSE_SECRET") {
+		t.Fatalf("scan leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestUninstallCLIExitCodesAndSummaries(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		setup    func(string)
+		wantCode int
+		wantOut  string
+	}{
+		{name: "removed some", setup: func(home string) {
+			writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{\"mcpServers\": {\"example\": {\"headers\": {\"Authorization\": \"Bearer UNINSTALL_CLI_SECRET\"}, \"url\": \"https://mcp.example.test/mcp\"}, \"other\": {\"url\": \"https://other/mcp\"}}}\n", 0o600)
+		}, wantCode: 0, wantOut: "Removed Cursor \"example\""},
+		{name: "removed none", setup: func(home string) {
+			writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{\"mcpServers\": {\"other\": {\"url\": \"https://other/mcp\"}}}\n", 0o600)
+		}, wantCode: 0, wantOut: "No matching \"example\" entries removed"},
+		{name: "could not verify", setup: func(home string) {
+			writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{not-json UNINSTALL_PARSE_SECRET", 0o600)
+		}, wantCode: 1, wantOut: "UNREADABLE - cannot verify: Cursor"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			tt.setup(home)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Main([]string{"uninstall", "example", "--client", "cursor"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.wantOut) {
+				t.Fatalf("stdout missing %q: %q", tt.wantOut, stdout.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), "UNINSTALL_CLI_SECRET") || strings.Contains(stdout.String()+stderr.String(), "UNINSTALL_PARSE_SECRET") {
+				t.Fatalf("uninstall leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestUninstallNonTTYWithoutYesOrClientExitsTwoAndWritesNothing(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".cursor", "mcp.json")
+	before := "{\"mcpServers\": {\"example\": {\"headers\": {\"Authorization\": \"Bearer NONTTY_UNINSTALL_SECRET\"}, \"url\": \"https://mcp.example.test/mcp\"}}}\n"
+	writeFile(t, path, before, 0o600)
+	mkdirAll(t, filepath.Join(home, ".cursor"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"uninstall", "example"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--yes") || !strings.Contains(stderr.String(), "--client") {
+		t.Fatalf("stderr = %q, want --yes and --client", stderr.String())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if got := string(raw); got != before {
+		t.Fatalf("non-TTY uninstall changed config to %q", got)
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "NONTTY_UNINSTALL_SECRET") {
+		t.Fatalf("non-TTY uninstall leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestPromptCLIIncludesManualClientsAndCodexNotYetImplemented(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"prompt", "mcp.example.test/mcp"}, &stdout, &stderr, func() (harness.Env, error) { return harness.Env{}, nil })
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{"Claude Desktop", "JetBrains", "Codex", "hitch cannot configure Codex automatically yet", "https://mcp.example.test/mcp", "bearer_token_env_var"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("prompt output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
 func cursorAuthorization(t *testing.T, home string) string {
 	t.Helper()
 	return cursorHeaders(t, home)["Authorization"]

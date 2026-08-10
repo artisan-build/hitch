@@ -759,6 +759,149 @@ func TestInteractiveInstallPropagatesRelativePreferencePathError(t *testing.T) {
 	}
 }
 
+func TestUninstallRemovesEntryForEveryClientAndPreservesOtherContent(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range shapeCases(t.TempDir()) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			env := testEnv(home)
+			path := expectedPath(home, tt.id)
+			before := "{\n  \"zeta\": true,\n  \"" + tt.key + "\": {\n    \"alpha\": {\"url\": \"https://alpha/mcp\"},\n    \"renamed\": {\"headers\": {\"Authorization\": \"Bearer REMOVE_SENTINEL_SECRET\"}, \"url\": \"https://remove/mcp\"},\n    \"omega\": {\"url\": \"https://omega/mcp\"}\n  },\n  \"alpha\": false\n}\n"
+			writeFile(t, path, before, 0o600)
+
+			res, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{tt.id}, Yes: true, NonTTY: true, Env: env})
+			if err != nil {
+				t.Fatalf("Uninstall returned error: %v", err)
+			}
+			if len(res.Removed) != 1 || res.Removed[0].Path != path || !res.Removed[0].HoldsCredential {
+				t.Fatalf("removed = %#v, want credential-bearing removal from %s", res.Removed, path)
+			}
+			after := readFile(t, path)
+			if after == before {
+				t.Fatalf("uninstall made no byte change")
+			}
+			if strings.Contains(after, "renamed") || strings.Contains(after, "REMOVE_SENTINEL_SECRET") {
+				t.Fatalf("removed entry or token survived:\n%s", after)
+			}
+			for _, want := range []string{"\"zeta\": true", "\"alpha\": false", "\"alpha\": {\"url\": \"https://alpha/mcp\"}", "\"omega\": {\"url\": \"https://omega/mcp\"}"} {
+				if !strings.Contains(after, want) {
+					t.Fatalf("after missing preserved content %q:\n%s", want, after)
+				}
+			}
+			readJSON(t, path)
+		})
+	}
+}
+
+func TestUninstallLastServerLeavesValidEmptyServerMap(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	writeFile(t, path, "{\n  \"mcpServers\": {\n    \"renamed\": {\"headers\": {\"Authorization\": \"Bearer REMOVE_LAST_SECRET\"}, \"url\": \"https://remove/mcp\"}\n  },\n  \"keep\": true\n}\n", 0o600)
+	res, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err != nil || len(res.Removed) != 1 {
+		t.Fatalf("Uninstall err = %v removed = %#v", err, res.Removed)
+	}
+	data := readJSON(t, path)
+	servers := data["mcpServers"].(map[string]any)
+	if len(servers) != 0 || data["keep"] != true {
+		t.Fatalf("after uninstall data = %#v, want empty mcpServers and keep=true", data)
+	}
+}
+
+func TestUninstallMissingServerIsCleanNoOpAndNoWrite(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	before := "{\n  \"mcpServers\": {\n    \"other\": {\"url\": \"https://other/mcp\"}\n  }\n}\n"
+	writeFile(t, path, before, 0o600)
+	res, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err != nil {
+		t.Fatalf("Uninstall returned error: %v", err)
+	}
+	if len(res.Removed) != 0 || len(res.NotPresent) != 1 {
+		t.Fatalf("result = %#v, want one not-present no-op", res)
+	}
+	if got := readFile(t, path); got != before {
+		t.Fatalf("missing server changed config:\n%s", got)
+	}
+}
+
+func TestScanAndUninstallTreatMalformedConfigAsUnreadableAndUnchanged(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	before := "{not-json REMOVE_PARSE_SECRET"
+	writeFile(t, path, before, 0o600)
+	scans, err := Scan(testEnv(home), "renamed", []string{"cursor"})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(scans) != 1 || scans[0].Status != ScanUnreadable || !strings.Contains(scans[0].Detail, path) {
+		t.Fatalf("scan = %#v, want unreadable naming path", scans)
+	}
+	res, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err == nil || len(res.Unreadable) != 1 {
+		t.Fatalf("Uninstall err = %v result = %#v, want unreadable error", err, res)
+	}
+	if got := readFile(t, path); got != before {
+		t.Fatalf("malformed config changed to %q", got)
+	}
+}
+
+func TestScanAndUninstallTreatPermissionDeniedAsUnreadableAndUnchanged(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read mode 000 files")
+	}
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	before := "{\n  \"mcpServers\": {\n    \"renamed\": {\"headers\": {\"Authorization\": \"Bearer PERMISSION_SECRET\"}, \"url\": \"https://remove/mcp\"}\n  }\n}\n"
+	writeFile(t, path, before, 0o600)
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("chmod unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	scans, err := Scan(testEnv(home), "renamed", []string{"cursor"})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(scans) != 1 || scans[0].Status != ScanUnreadable {
+		t.Fatalf("scan = %#v, want unreadable permission outcome", scans)
+	}
+	res, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err == nil || len(res.Unreadable) != 1 || len(res.Removed) != 0 {
+		t.Fatalf("Uninstall err = %v result = %#v, want unreadable only", err, res)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("restore mode: %v", err)
+	}
+	if got := readFile(t, path); got != before {
+		t.Fatalf("unreadable config changed to %q", got)
+	}
+}
+
+func TestScanDetectsCredentialWithoutPrintingIt(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	writeFile(t, path, "{\"mcpServers\": {\"renamed\": {\"headers\": {\"Authorization\": \"Bearer SCAN_SECRET\"}, \"url\": \"https://remove/mcp\"}}}\n", 0o600)
+	scans, err := Scan(testEnv(home), "renamed", []string{"cursor"})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if len(scans) != 1 || scans[0].Status != ScanHasEntry || !scans[0].HoldsCredential {
+		t.Fatalf("scan = %#v, want has-entry with credential", scans)
+	}
+}
+
 func baseOptions(env harness.Env, clientIDs ...string) Options {
 	return Options{
 		URL:     testURL,
