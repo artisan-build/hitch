@@ -4,6 +4,7 @@ set -eu
 REPO=${HITCH_REPO:-artisan-build/hitch}
 VERSION=${HITCH_VERSION:-latest}
 PREFIX=${PREFIX:-/usr/local}
+HITCH_TMP_BIN=
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'hitch install: %s\n' "$*" >&2; exit 1; }
@@ -105,6 +106,14 @@ verify_checksum() {
   [ "$actual" = "$expected" ] || fail "checksum mismatch for $asset"
 }
 
+fail_install_archive() {
+  tmp_bin=$1
+  message=$2
+  rm -f "$tmp_bin"
+  HITCH_TMP_BIN=
+  fail "$message"
+}
+
 install_archive() {
   archive=$1
   dir=$2
@@ -113,10 +122,12 @@ install_archive() {
   tar -xzf "$archive" -C "$tmp_extract" || fail "failed to extract release archive"
   [ -f "$tmp_extract/hitch" ] || fail "release archive does not contain hitch"
   chmod 0755 "$tmp_extract/hitch" || fail "failed to mark hitch executable"
-  tmp_bin="$dir/.hitch.$$"
-  cp "$tmp_extract/hitch" "$tmp_bin" || fail "failed to copy hitch into $dir"
-  chmod 0755 "$tmp_bin" || { rm -f "$tmp_bin"; fail "failed to mark $tmp_bin executable"; }
-  mv "$tmp_bin" "$dir/hitch" || { rm -f "$tmp_bin"; fail "failed to install hitch to $dir/hitch"; }
+  tmp_bin=$(mktemp "$dir/.hitch.XXXXXX") || fail "failed to create a temporary install file in $dir"
+  HITCH_TMP_BIN=$tmp_bin
+  cp "$tmp_extract/hitch" "$tmp_bin" || fail_install_archive "$tmp_bin" "failed to copy hitch into $dir"
+  chmod 0755 "$tmp_bin" || fail_install_archive "$tmp_bin" "failed to mark $tmp_bin executable"
+  mv "$tmp_bin" "$dir/hitch" || fail_install_archive "$tmp_bin" "failed to install hitch to $dir/hitch"
+  HITCH_TMP_BIN=
 }
 
 main() {
@@ -126,13 +137,13 @@ main() {
   base=$(release_base_url)
   install_dir=$(choose_install_dir) || fail "no writable install directory; set INSTALL_DIR or PREFIX"
   tmp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t hitch)
-  trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+  trap 'rm -rf "$tmp_dir"; [ -z "$HITCH_TMP_BIN" ] || rm -f "$HITCH_TMP_BIN"' EXIT INT TERM
 
   say "Installing hitch ${VERSION} for ${os}/${arch}"
   say "Downloading ${asset}"
-  download_file "$base/$asset" "$tmp_dir/$asset" || fail "failed to download $asset"
+  download_file "$base/$asset" "$tmp_dir/$asset" || fail "no such release or asset for ${VERSION}: failed to download $asset from $base"
   say "Downloading checksums.txt"
-  download_file "$base/checksums.txt" "$tmp_dir/checksums.txt" || fail "failed to download checksums.txt"
+  download_file "$base/checksums.txt" "$tmp_dir/checksums.txt" || fail "no such release or checksums for ${VERSION}: failed to download checksums.txt from $base"
   say "Verifying checksum"
   verify_checksum "$tmp_dir/$asset" "$tmp_dir/checksums.txt" "$asset"
   say "Installing to ${install_dir}/hitch"

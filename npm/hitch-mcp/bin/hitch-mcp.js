@@ -30,11 +30,12 @@ function download(url, dest) {
     const file = fs.createWriteStream(dest, { mode: 0o600 });
     https.get(url, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-        file.close(() => fs.rmSync(dest, { force: true }));
-        download(response.headers.location, dest).then(resolve, reject);
+        response.resume();
+        file.close(() => download(response.headers.location, dest).then(resolve, reject));
         return;
       }
       if (response.statusCode !== 200) {
+        response.resume();
         file.close(() => fs.rmSync(dest, { force: true }));
         reject(new Error(`download failed with HTTP ${response.statusCode}: ${url}`));
         return;
