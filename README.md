@@ -8,6 +8,9 @@ credential carefully — and find and remove every copy of it later.
 
 ## Current Release: v0.0.2
 
+`main` is ahead of the tag. Everything in this section is in v0.0.2; see
+[On main, not yet released](#on-main-not-yet-released) for what isn't.
+
 Every MCP client stores server config in a different file, under a different key, with a different
 schema for the same server. `hitch` detects the harnesses you actually have, **asks which ones you
 want this server in**, and writes the correct config for each.
@@ -28,9 +31,10 @@ Written by hitch: Claude Code · Cursor · Windsurf · Zed · VS Code · Gemini 
 
 Codex is detected but not configured automatically. When Codex is detected or selected, hitch prints
 manual `[mcp_servers.<name>]` instructions using `bearer_token_env_var` and an
-`export HITCH_TOKEN_<NAME>=...` command. `hitch scan` can verify user-global
-`~/.codex/config.toml`, and `hitch uninstall` can remove matching Codex entries without rewriting
-the rest of the TOML file.
+`export HITCH_TOKEN_<NAME>=...` command. On `main` (not in v0.0.2), `hitch scan` can verify
+user-global `~/.codex/config.toml` and `hitch uninstall` can remove a matching entry without
+rewriting the rest of the TOML — and where the file uses a layout hitch cannot splice safely, it
+reports that it cannot verify the file rather than editing it.
 
 Claude Desktop and JetBrains are recognized but deliberately not written to. See the spec for why.
 
@@ -96,10 +100,20 @@ hitch prompt https://example.com/mcp
 Prints ready-to-follow instructions for Claude Desktop, JetBrains, and manual Codex setup. Codex is
 manual-install only; `scan` and `uninstall` are supported for user-global Codex config.
 
-## Not in v0.0.2
+## On main, not yet released
 
-- Project-scoped installs (`--project`).
-- Automatic Codex configuration.
+The v0.0.2 binary — what `curl | sh` and `go install …@v0.0.2` give you — does **not** include these.
+They are on `main` and ship in the next tag:
+
+- Project-scoped installs (`-p/--project`), with a gitignore guard before a credential lands in a
+  project file.
+- Codex `scan` and `uninstall` for the user-global `~/.codex/config.toml`.
+
+## Not planned for the next release
+
+- Automatic Codex configuration. Codex stays manual-install; `hitch prompt` gives you the entry to
+  paste, and `scan`/`uninstall` find and remove it afterwards.
+- Project-scoped Codex config. No vendor-documented path exists for it, so hitch does not guess one.
 
 ## Build From Source
 
