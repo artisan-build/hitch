@@ -1260,6 +1260,117 @@ func TestProjectScanAndUninstallUseProjectPaths(t *testing.T) {
 	}
 }
 
+func TestProjectInstallUsesGitTopLevelFromSubdirectory(t *testing.T) {
+	project := initGitRepo(t)
+	subdir := filepath.Join(project, "sub", "deeper")
+	if err := os.MkdirAll(subdir, 0o700); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	env := projectEnv(project)
+	env.WorkDir = subdir
+	opts := baseOptions(env, "cursor")
+	opts.Project = true
+	res, err := InstallRemote(opts)
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	want := filepath.Join(project, ".cursor", "mcp.json")
+	if len(res.Written) != 1 || res.Written[0] != want {
+		t.Fatalf("written = %#v, want git top-level path %s", res.Written, want)
+	}
+	if _, err := os.Stat(filepath.Join(subdir, ".cursor", "mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("project install wrote cwd subdir path, stat err = %v", err)
+	}
+}
+
+func TestProjectYesRespectsDetectedClients(t *testing.T) {
+	project := initGitRepo(t)
+	env := projectEnv(project)
+	makeMarker(t, env.Home, "cursor")
+	opts := baseOptions(env)
+	opts.Project = true
+	opts.Yes = true
+	res, err := InstallRemote(opts)
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	want := filepath.Join(project, ".cursor", "mcp.json")
+	if len(res.Written) != 1 || res.Written[0] != want {
+		t.Fatalf("written = %#v, want only detected cursor project path", res.Written)
+	}
+	for _, path := range []string{filepath.Join(project, ".mcp.json"), filepath.Join(project, ".zed", "settings.json"), filepath.Join(project, ".vscode", "mcp.json"), filepath.Join(project, ".gemini", "settings.json"), filepath.Join(project, "opencode.json")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("undetected client project path was written: %s", path)
+		}
+	}
+}
+
+func TestProjectInteractiveInstallDoesNotSaveGlobalPreferences(t *testing.T) {
+	project := initGitRepo(t)
+	env := projectEnv(project)
+	makeMarker(t, env.Home, "cursor")
+	opts := baseOptions(env)
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.PickTargets = func(targets []Target, preferred map[string]bool) ([]Target, error) {
+		if preferred != nil {
+			t.Fatalf("project picker preferred = %#v, want nil", preferred)
+		}
+		return targets, nil
+	}
+	opts.ConfirmProjectWrite = func(string) (bool, error) { return true, nil }
+	if _, err := InstallRemote(opts); err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(env.Home, ".config", "hitch", "preferences.json")); !os.IsNotExist(err) {
+		t.Fatalf("project interactive install saved global preferences, stat err = %v", err)
+	}
+}
+
+func TestProjectCodexContract(t *testing.T) {
+	project := initGitRepo(t)
+	env := projectEnv(project)
+	writeFile(t, filepath.Join(env.Home, ".codex", "config.toml"), "[mcp_servers.renamed]\nurl = \"https://x.test/mcp\"\nbearer_token = \"CODEX_GLOBAL_SECRET\"\n", 0o600)
+	projectScans, err := ScanScoped(env, "renamed", nil, true)
+	if err != nil {
+		t.Fatalf("project ScanScoped returned error: %v", err)
+	}
+	for _, scan := range projectScans {
+		if scan.Client.ID == "codex" || strings.Contains(scan.Path, ".codex") {
+			t.Fatalf("project scan included Codex: %#v", projectScans)
+		}
+	}
+	_, err = InstallRemote(Options{URL: testURL, Name: "renamed", Headers: map[string]string{"Authorization": "Bearer " + testToken}, Clients: []string{"codex"}, Project: true, Yes: true, NonTTY: true, Env: env})
+	if err == nil || !strings.Contains(err.Error(), "no project config path") {
+		t.Fatalf("project Codex install error = %v, want no project config path", err)
+	}
+	globalScans, err := Scan(env, "renamed", []string{"codex"})
+	if err != nil {
+		t.Fatalf("global Scan returned error: %v", err)
+	}
+	if len(globalScans) != 1 || globalScans[0].Client.ID != "codex" || globalScans[0].Status != ScanUnreadable {
+		t.Fatalf("global Codex scan = %#v, want unreadable global Codex", globalScans)
+	}
+}
+
+func TestProjectClientWithoutProjectPathGetsSpecificError(t *testing.T) {
+	project := initGitRepo(t)
+	_, err := InstallRemote(Options{URL: testURL, Name: "renamed", Headers: map[string]string{"Authorization": "Bearer " + testToken}, Clients: []string{"windsurf"}, Project: true, Yes: true, NonTTY: true, Env: projectEnv(project)})
+	if err == nil || !strings.Contains(err.Error(), "no project config path") || strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("Windsurf project error = %v, want known client with no project config path", err)
+	}
+}
+
+func TestGlobalNonTTYInstallRefusalIsDistinctFromProjectGitignoreRefusal(t *testing.T) {
+	env := testEnv(t.TempDir())
+	makeMarker(t, env.Home, "cursor")
+	_, err := InstallRemote(Options{URL: testURL, Name: "renamed", Headers: map[string]string{"Authorization": "Bearer " + testToken}, Yes: false, NonTTY: true, Env: env})
+	if err == nil || !strings.Contains(err.Error(), "requires either -y/--yes or -c/--client") || strings.Contains(err.Error(), "gitignored") {
+		t.Fatalf("global non-TTY error = %v, want general picker refusal", err)
+	}
+}
+
 func TestGitIgnoredProjectCredentialWriteDoesNotRequireConfirmation(t *testing.T) {
 	project := initGitRepo(t)
 	writeFile(t, filepath.Join(project, ".gitignore"), ".cursor/mcp.json\n", 0o600)
@@ -1291,16 +1402,179 @@ func TestUnignoredProjectCredentialWriteWarnsRefusesAndLeavesTargetAbsent(t *tes
 	opts.Project = true
 	opts.Yes = false
 	opts.NonTTY = true
+	opts.ConfirmProjectWrite = func(string) (bool, error) {
+		t.Fatalf("non-TTY guard must not prompt")
+		return false, nil
+	}
 	opts.Stdout = &out
 	res, err := InstallRemote(opts)
 	if err == nil || len(res.Failures) != 1 {
 		t.Fatalf("InstallRemote err = %v failures = %#v, want refusal", err, res.Failures)
+	}
+	if !strings.Contains(err.Error(), "write credentials anyway") {
+		t.Fatalf("InstallRemote error = %v, want gitignore-specific non-TTY refusal", err)
 	}
 	if !strings.Contains(out.String(), "WARNING") || !strings.Contains(out.String(), path) || strings.Contains(out.String(), testToken) {
 		t.Fatalf("warning output = %q, want path-only warning", out.String())
 	}
 	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 		t.Fatalf("refused project write created target, stat err = %v", statErr)
+	}
+}
+
+func TestConfirmedProjectCredentialWriteSucceedsWithModeAndContent(t *testing.T) {
+	project := initGitRepo(t)
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	var out strings.Builder
+	opts := baseOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.Stdout = &out
+	opts.ConfirmProjectWrite = func(got string) (bool, error) {
+		if got != path {
+			t.Fatalf("confirm path = %q, want %q", got, path)
+		}
+		return true, nil
+	}
+	res, err := InstallRemote(opts)
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	if len(res.Written) != 1 || res.Written[0] != path {
+		t.Fatalf("written = %#v, want %s", res.Written, path)
+	}
+	assertMode0600(t, path)
+	if got := cursorServerAt(t, path)["headers"].(map[string]any)["Authorization"]; got != "Bearer "+testToken {
+		t.Fatalf("Authorization = %q, want token persisted in selected file", got)
+	}
+	if !strings.Contains(out.String(), "WARNING") || strings.Contains(out.String(), testToken) {
+		t.Fatalf("confirmation warning output = %q", out.String())
+	}
+}
+
+func TestProjectGuardChecksResolvedSymlinkTargetAndSummaryUsesTarget(t *testing.T) {
+	project := initGitRepo(t)
+	shared := filepath.Join(project, "shared", "mcp.json")
+	link := filepath.Join(project, ".cursor", "mcp.json")
+	writeFile(t, filepath.Join(project, ".gitignore"), ".cursor/mcp.json\n", 0o600)
+	writeFile(t, shared, "{\"mcpServers\":{}}\n", 0o600)
+	runGit(t, project, "add", "shared/mcp.json")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatalf("mkdir link dir: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..", "shared", "mcp.json"), link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	var out strings.Builder
+	opts := baseOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.Yes = true
+	opts.Stdout = &out
+	res, err := InstallRemote(opts)
+	if err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	if len(res.Written) != 1 || res.Written[0] != shared {
+		t.Fatalf("written = %#v, want resolved target %s", res.Written, shared)
+	}
+	if !strings.Contains(out.String(), "WARNING") || !strings.Contains(out.String(), shared) || strings.Contains(out.String(), link+")") || strings.Contains(out.String(), testToken) {
+		t.Fatalf("output = %q, want warning/summary for resolved target without token", out.String())
+	}
+	if got := cursorServerAt(t, shared)["headers"].(map[string]any)["Authorization"]; got != "Bearer "+testToken {
+		t.Fatalf("shared target Authorization = %q", got)
+	}
+}
+
+func TestProjectGuardIgnoresGITIndexFileOverride(t *testing.T) {
+	project := initGitRepo(t)
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	before := "{\"mcpServers\":{}}\n"
+	writeFile(t, filepath.Join(project, ".gitignore"), ".cursor/mcp.json\n", 0o600)
+	writeFile(t, path, before, 0o600)
+	runGit(t, project, "add", "-f", ".cursor/mcp.json")
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(project, "missing-index"))
+	var out strings.Builder
+	opts := baseOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = true
+	opts.Stdout = &out
+	_, err := InstallRemote(opts)
+	if err == nil || !strings.Contains(err.Error(), "write credentials anyway") {
+		t.Fatalf("InstallRemote error = %v, want gitignore refusal", err)
+	}
+	if got := readFile(t, path); got != before {
+		t.Fatalf("tracked target changed under GIT_INDEX_FILE override to %q", got)
+	}
+}
+
+func TestProjectGuardIgnoresDecoyGitDirAndWorkTree(t *testing.T) {
+	project := initGitRepo(t)
+	decoy := initGitRepo(t)
+	writeFile(t, filepath.Join(decoy, ".git", "info", "exclude"), ".cursor/mcp.json\n", 0o600)
+	t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+	t.Setenv("GIT_WORK_TREE", decoy)
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	var out strings.Builder
+	opts := baseOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = true
+	opts.Stdout = &out
+	_, err := InstallRemote(opts)
+	if err == nil || !strings.Contains(err.Error(), "write credentials anyway") {
+		t.Fatalf("InstallRemote error = %v, want real repo gitignore refusal", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("decoy git env allowed write, stat err = %v", statErr)
+	}
+}
+
+func TestProjectGuardFailsClosedWhenGitCannotRun(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("PATH", filepath.Join(project, "empty-bin"))
+	if err := os.MkdirAll(filepath.Join(project, "empty-bin"), 0o700); err != nil {
+		t.Fatalf("mkdir empty bin: %v", err)
+	}
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	var out strings.Builder
+	opts := baseOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = true
+	opts.Stdout = &out
+	_, err := InstallRemote(opts)
+	if err == nil || !strings.Contains(err.Error(), "write credentials anyway") {
+		t.Fatalf("InstallRemote error = %v, want fail-closed gitignore refusal", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("git failure allowed write, stat err = %v", statErr)
+	}
+}
+
+func TestProjectDryRunReportsGitignoreWarningAndWritesNothing(t *testing.T) {
+	project := initGitRepo(t)
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	var out strings.Builder
+	opts := baseOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.DryRun = true
+	opts.Yes = false
+	opts.NonTTY = true
+	opts.Stdout = &out
+	res, err := InstallRemote(opts)
+	if err != nil {
+		t.Fatalf("InstallRemote dry-run returned error: %v", err)
+	}
+	if len(res.WouldWrite) != 1 || res.WouldWrite[0] != path {
+		t.Fatalf("wouldWrite = %#v, want %s", res.WouldWrite, path)
+	}
+	if !strings.Contains(out.String(), "WARNING") || !strings.Contains(out.String(), "Would write Cursor to "+path) || strings.Contains(out.String(), testToken) {
+		t.Fatalf("dry-run output = %q", out.String())
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("dry-run wrote target, stat err = %v", statErr)
 	}
 }
 
@@ -1420,6 +1694,7 @@ func TestGitCheckIgnoredCoversGitIgnoreBoundary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			project := initGitRepo(t)
+			pinGitEnv(t, project)
 			path := tt.setup(t, project)
 			got, err := gitCheckIgnored(projectEnv(project), path)
 			if err != nil {
@@ -1478,17 +1753,41 @@ func initGitRepo(t *testing.T) string {
 	t.Helper()
 	project := t.TempDir()
 	runGit(t, project, "init", "-q")
-	return project
+	root, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatalf("resolve temp git repo %q: %v", project, err)
+	}
+	return root
 }
 
 func runGit(t *testing.T, project string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = project
-	cmd.Env = gitEnvWithoutWorktreeOverrides(os.Environ())
+	cmd.Env = gitTestEnv(project)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
+}
+
+func gitTestEnv(project string) []string {
+	path := os.Getenv("PATH")
+	return []string{
+		"PATH=" + path,
+		"HOME=" + filepath.Join(project, "git-home"),
+		"GIT_CONFIG_GLOBAL=" + filepath.Join(project, "git-global-config"),
+		"GIT_CONFIG_SYSTEM=" + filepath.Join(project, "git-system-config"),
+	}
+}
+
+func pinGitEnv(t *testing.T, project string) {
+	t.Helper()
+	t.Setenv("HOME", filepath.Join(project, "git-home"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(project, "git-global-config"))
+	t.Setenv("GIT_CONFIG_SYSTEM", filepath.Join(project, "git-system-config"))
+	t.Setenv("GIT_INDEX_FILE", "")
+	t.Setenv("GIT_DIR", "")
+	t.Setenv("GIT_WORK_TREE", "")
 }
 
 func stdioOptions(env harness.Env, clientIDs ...string) Options {
@@ -1620,6 +1919,14 @@ func readJSON(t *testing.T, path string) map[string]any {
 		t.Fatalf("json parse %q: %v", path, err)
 	}
 	return data
+}
+
+func cursorServerAt(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data := readJSON(t, path)
+	servers := data["mcpServers"].(map[string]any)
+	server := servers["renamed"].(map[string]any)
+	return server
 }
 
 func jsonObjectValueKeyOrder(t *testing.T, raw []byte, key string) []string {

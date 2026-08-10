@@ -228,6 +228,11 @@ func scanClients(env harness.Env, project bool) ([]harness.DetectionResult, erro
 	if !project {
 		return harness.Detect(env)
 	}
+	root, err := projectRoot(env)
+	if err != nil {
+		return nil, err
+	}
+	env.WorkDir = root
 	clients := harness.FileWriterClients()
 	results := make([]harness.DetectionResult, 0, len(clients))
 	for _, client := range clients {
@@ -504,29 +509,34 @@ func InstallRemote(opts Options) (Result, error) {
 			continue
 		}
 		entry := adapter.BuildRemoteEntry(opts.URL, opts.Headers, res.CodexEnvVar)
-		if err := guardProjectCredentialWrite(opts, target.Path, entry); err != nil {
+		writePath, err := resolvedWritePath(target.Path)
+		if err != nil {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+			continue
+		}
+		if err := guardProjectCredentialWrite(opts, writePath, entry); err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
 			continue
 		}
 		if opts.DryRun {
-			if err := ValidateEntry(target.Path, adapter, name, entry); err != nil {
+			if err := ValidateEntry(writePath, adapter, name, entry); err != nil {
 				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
 				continue
 			}
-			res.WouldWrite = append(res.WouldWrite, target.Path)
+			res.WouldWrite = append(res.WouldWrite, writePath)
 			if opts.Stdout != nil {
-				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, target.Path, MaskedJSON(entry))
+				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, writePath, MaskedJSON(entry))
 			}
 			continue
 		}
-		if err := WriteEntry(target.Path, adapter, name, entry); err != nil {
+		if err := WriteEntry(writePath, adapter, name, entry); err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
 			continue
 		}
-		res.Written = append(res.Written, target.Path)
-		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: target.Path})
+		res.Written = append(res.Written, writePath)
+		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: writePath})
 	}
-	if interactive && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
+	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
 		for _, target := range targets {
 			ids = append(ids, target.Client.ID)
@@ -577,29 +587,34 @@ func InstallStdio(opts Options) (Result, error) {
 			continue
 		}
 		entry := adapter.BuildStdioEntry(opts.Command, opts.Args, opts.StdioEnv)
-		if err := guardProjectCredentialWrite(opts, target.Path, entry); err != nil {
+		writePath, err := resolvedWritePath(target.Path)
+		if err != nil {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+			continue
+		}
+		if err := guardProjectCredentialWrite(opts, writePath, entry); err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
 			continue
 		}
 		if opts.DryRun {
-			if err := ValidateEntry(target.Path, adapter, name, entry); err != nil {
+			if err := ValidateEntry(writePath, adapter, name, entry); err != nil {
 				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
 				continue
 			}
-			res.WouldWrite = append(res.WouldWrite, target.Path)
+			res.WouldWrite = append(res.WouldWrite, writePath)
 			if opts.Stdout != nil {
-				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, target.Path, MaskedJSON(entry))
+				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, writePath, MaskedJSON(entry))
 			}
 			continue
 		}
-		if err := WriteEntry(target.Path, adapter, name, entry); err != nil {
+		if err := WriteEntry(writePath, adapter, name, entry); err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
 			continue
 		}
-		res.Written = append(res.Written, target.Path)
-		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: target.Path})
+		res.Written = append(res.Written, writePath)
+		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: writePath})
 	}
-	if interactive && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
+	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
 		for _, target := range targets {
 			ids = append(ids, target.Client.ID)
@@ -718,18 +733,34 @@ func resolveTargets(opts Options) ([]Target, bool, error) {
 }
 
 func resolveProjectTargets(opts Options) ([]Target, bool, error) {
-	results, err := scanClients(opts.Env, true)
+	root, err := projectRoot(opts.Env)
 	if err != nil {
 		return nil, false, err
 	}
+	opts.Env.WorkDir = root
+	projectResults, err := scanClients(opts.Env, true)
+	if err != nil {
+		return nil, false, err
+	}
+	globalResults, err := harness.Detect(opts.Env)
+	if err != nil {
+		return nil, false, err
+	}
+	detectedByID := map[string]bool{}
+	for _, result := range globalResults {
+		detectedByID[result.ID] = result.Detected
+	}
 	byID := map[string]harness.DetectionResult{}
-	targets := []Target{}
-	for _, result := range results {
-		byID[result.ID] = result
-		if result.ID == "codex" {
-			continue
+	knownNoProjectPath := map[string]bool{}
+	for _, client := range harness.FileWriterClients() {
+		if _, ok, err := harness.ProjectConfigPath(client.ID, opts.Env); err == nil && !ok {
+			knownNoProjectPath[client.ID] = true
 		}
-		if _, ok := AdapterByClientID(result.ID); ok {
+	}
+	targets := []Target{}
+	for _, result := range projectResults {
+		byID[result.ID] = result
+		if _, ok := AdapterByClientID(result.ID); ok && detectedByID[result.ID] {
 			targets = append(targets, Target{Client: result, Path: result.ConfigPath})
 		}
 	}
@@ -738,6 +769,9 @@ func resolveProjectTargets(opts Options) ([]Target, bool, error) {
 		for _, id := range opts.Clients {
 			result, ok := byID[id]
 			if !ok {
+				if knownNoProjectPath[id] {
+					return nil, false, fmt.Errorf("client %q has no project config path", id)
+				}
 				return nil, false, fmt.Errorf("unknown file-writer client %q", id)
 			}
 			selected = append(selected, Target{Client: result, Path: result.ConfigPath})
@@ -771,7 +805,7 @@ func codexDetected(env harness.Env) bool {
 }
 
 func guardProjectCredentialWrite(opts Options, path string, entry map[string]any) error {
-	if !opts.Project || opts.DryRun || !holdsCredential(entry) {
+	if !opts.Project || !holdsCredential(entry) {
 		return nil
 	}
 	ignored, err := projectPathIgnored(opts.Env, path)
@@ -785,6 +819,9 @@ func guardProjectCredentialWrite(opts Options, path string, entry map[string]any
 		_, _ = fmt.Fprintf(opts.Stdout, "WARNING: project config %s is not gitignored; it may store credentials.\n", path)
 	}
 	if opts.Yes {
+		return nil
+	}
+	if opts.DryRun {
 		return nil
 	}
 	if opts.NonTTY {
@@ -805,17 +842,45 @@ func guardProjectCredentialWrite(opts Options, path string, entry map[string]any
 
 var projectPathIgnored = gitCheckIgnored
 
-func gitCheckIgnored(env harness.Env, path string) (bool, error) {
-	root := env.WorkDir
-	if root == "" {
-		root = env.Home
+func resolvedWritePath(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return "", fmt.Errorf("config path must be absolute: %q", path)
 	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if os.IsNotExist(err) {
+		return path, nil
+	}
+	return "", fmt.Errorf("could not resolve config path %s: %w", path, err)
+}
+
+func projectRoot(env harness.Env) (string, error) {
+	if env.WorkDir == "" || !filepath.IsAbs(env.WorkDir) {
+		return "", fmt.Errorf("project path must be absolute; check current working directory")
+	}
+	cmd := exec.Command("git", "-C", env.WorkDir, "rev-parse", "--show-toplevel")
+	cmd.Env = gitAllowlistEnv(os.Environ())
+	out, err := cmd.Output()
+	if err != nil {
+		return env.WorkDir, nil
+	}
+	root := strings.TrimSpace(string(out))
 	if root == "" || !filepath.IsAbs(root) {
-		return false, fmt.Errorf("project path must be absolute; check current working directory")
+		return "", fmt.Errorf("git reported invalid project root %q", root)
+	}
+	return root, nil
+}
+
+func gitCheckIgnored(env harness.Env, path string) (bool, error) {
+	root, err := projectRoot(env)
+	if err != nil {
+		return false, err
 	}
 	cmd := exec.Command("git", "-C", root, "check-ignore", "-q", "--", path)
-	cmd.Env = gitEnvWithoutWorktreeOverrides(os.Environ())
-	err := cmd.Run()
+	cmd.Env = gitAllowlistEnv(os.Environ())
+	err = cmd.Run()
 	if err == nil {
 		return true, nil
 	}
@@ -829,14 +894,14 @@ func gitCheckIgnored(env harness.Env, path string) (bool, error) {
 	return false, err
 }
 
-func gitEnvWithoutWorktreeOverrides(env []string) []string {
-	out := env[:0]
+func gitAllowlistEnv(env []string) []string {
+	out := []string{}
 	for _, value := range env {
 		key, _, _ := strings.Cut(value, "=")
-		if key == "GIT_DIR" || key == "GIT_WORK_TREE" {
-			continue
+		switch key {
+		case "HOME", "PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM":
+			out = append(out, value)
 		}
-		out = append(out, value)
 	}
 	return out
 }

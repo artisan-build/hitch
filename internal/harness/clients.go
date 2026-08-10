@@ -72,16 +72,12 @@ func ConfigPath(clientID string, env Env) (string, bool, error) {
 
 func ProjectConfigPath(clientID string, env Env) (string, bool, error) {
 	root := env.WorkDir
-	if root == "" {
-		root = env.Home
-	}
 	if root == "" || !filepath.IsAbs(root) {
 		return "", true, fmt.Errorf("project path must be absolute; check current working directory")
 	}
 	paths := map[string][]string{
 		"claude-code": {".mcp.json"},
 		"cursor":      {".cursor", "mcp.json"},
-		"codex":       {".codex", "config.toml"},
 		"zed":         {".zed", "settings.json"},
 		"vscode":      {".vscode", "mcp.json"},
 		"gemini-cli":  {".gemini", "settings.json"},

@@ -326,7 +326,6 @@ func TestProjectConfigPathLiteralTable(t *testing.T) {
 	tests := map[string]string{
 		"claude-code": filepath.Join(project, ".mcp.json"),
 		"cursor":      filepath.Join(project, ".cursor", "mcp.json"),
-		"codex":       filepath.Join(project, ".codex", "config.toml"),
 		"zed":         filepath.Join(project, ".zed", "settings.json"),
 		"vscode":      filepath.Join(project, ".vscode", "mcp.json"),
 		"gemini-cli":  filepath.Join(project, ".gemini", "settings.json"),
@@ -348,8 +347,19 @@ func TestProjectConfigPathLiteralTable(t *testing.T) {
 			}
 		})
 	}
-	if got, ok, err := ProjectConfigPath("windsurf", env); err != nil || ok || got != "" {
-		t.Fatalf("ProjectConfigPath(windsurf) = %q, %v, %v; want unsupported", got, ok, err)
+	for _, id := range []string{"codex", "windsurf"} {
+		if got, ok, err := ProjectConfigPath(id, env); err != nil || ok || got != "" {
+			t.Fatalf("ProjectConfigPath(%s) = %q, %v, %v; want unsupported", id, got, ok, err)
+		}
+	}
+}
+
+func TestProjectConfigPathRejectsMissingWorkDir(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := ProjectConfigPath("cursor", Env{Home: "/home/test", GOOS: "darwin"})
+	if err == nil || !strings.Contains(err.Error(), "current working directory") {
+		t.Fatalf("ProjectConfigPath missing WorkDir error = %v, want current working directory", err)
 	}
 }
 

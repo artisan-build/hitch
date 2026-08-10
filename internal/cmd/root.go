@@ -405,6 +405,10 @@ var runInstallPicker = func(url string, options []huh.Option[string], selected *
 }
 
 func confirmProjectCredentialWrite(path string) (bool, error) {
+	return runProjectCredentialConfirm(path)
+}
+
+var runProjectCredentialConfirm = func(path string) (bool, error) {
 	var ok bool
 	form := huh.NewForm(huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Project config %s is not gitignored and may store credentials. Write anyway?", path)).Value(&ok)))
 	return ok, form.Run()

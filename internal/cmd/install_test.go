@@ -532,8 +532,12 @@ func TestInstallDryRunHealthyConfigReportsWouldUpdate(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Dry run: would update "+path) {
-		t.Fatalf("dry-run output = %q, want would-update path", stdout.String())
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve path: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Dry run: would update "+resolvedPath) {
+		t.Fatalf("dry-run output = %q, want would-update path %q", stdout.String(), resolvedPath)
 	}
 }
 
@@ -805,6 +809,23 @@ func TestProjectScanAndUninstallCLIUseProjectPath(t *testing.T) {
 	}
 	if !strings.Contains(readText(t, globalPath), "GLOBAL_CLI_SECRET") {
 		t.Fatalf("project uninstall changed global config")
+	}
+}
+
+func TestConfirmProjectCredentialWriteUsesRunner(t *testing.T) {
+	oldRun := runProjectCredentialConfirm
+	t.Cleanup(func() { runProjectCredentialConfirm = oldRun })
+	called := false
+	runProjectCredentialConfirm = func(path string) (bool, error) {
+		called = true
+		if path != "/tmp/project/.cursor/mcp.json" {
+			t.Fatalf("confirm path = %q", path)
+		}
+		return true, nil
+	}
+	ok, err := confirmProjectCredentialWrite("/tmp/project/.cursor/mcp.json")
+	if err != nil || !ok || !called {
+		t.Fatalf("confirmProjectCredentialWrite = %v, %v, called=%v; want true nil called", ok, err, called)
 	}
 }
 
