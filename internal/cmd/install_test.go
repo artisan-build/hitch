@@ -803,6 +803,35 @@ func TestUninstallCLIExitCodesAndSummaries(t *testing.T) {
 	}
 }
 
+func TestUninstallAbsentAndUnreadableOutcomesStayDistinct(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		body       string
+		wantCode   int
+		wantOutput string
+	}{
+		{name: "absent is clean no-op", body: "{\"mcpServers\": {\"other\": {\"url\": \"https://other/mcp\"}}}\n", wantCode: 0, wantOutput: "No matching \"example\" entries removed"},
+		{name: "unreadable is not clean", body: "{not-json DISTINCT_UNREADABLE_SECRET", wantCode: 1, wantOutput: "UNREADABLE - cannot verify: Cursor"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), tt.body, 0o600)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Main([]string{"uninstall", "example", "--client", "cursor"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.wantOutput) {
+				t.Fatalf("stdout missing %q: %q", tt.wantOutput, stdout.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), "DISTINCT_UNREADABLE_SECRET") {
+				t.Fatalf("uninstall leaked unreadable sentinel; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestUninstallNonTTYWithoutYesOrClientExitsTwoAndWritesNothing(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, ".cursor", "mcp.json")

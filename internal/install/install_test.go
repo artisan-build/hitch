@@ -803,8 +803,10 @@ func TestUninstallAfterInstallOnCompactForeignConfigLeavesValidJSON(t *testing.T
 
 	home := t.TempDir()
 	path := expectedPath(home, "cursor")
-	foreign := `{"mcpServers":{"keep":{"url":"https://keep.test/mcp"}},"otherKey":1}`
+	foreign := `{"zzz":{"nested":{"v":true}},"mcpServers":{"keep":{"url":"https://keep.test/mcp"},"later":{"url":"https://later.test/mcp"}},"aaa":1}`
 	writeFile(t, path, foreign, 0o600)
+	beforeTopOrder := jsonObjectKeyOrder(t, []byte(foreign))
+	beforeServersOrder := jsonObjectValueKeyOrder(t, []byte(foreign), "mcpServers")
 	if _, err := InstallRemote(baseOptions(testEnv(home), "cursor")); err != nil {
 		t.Fatalf("InstallRemote returned error: %v", err)
 	}
@@ -812,14 +814,27 @@ func TestUninstallAfterInstallOnCompactForeignConfigLeavesValidJSON(t *testing.T
 	if installed == foreign || !strings.Contains(installed, "renamed") {
 		t.Fatalf("install did not create mixed foreign document:\n%s", installed)
 	}
+	installedTopOrder := jsonObjectKeyOrder(t, []byte(installed))
+	if strings.Join(installedTopOrder, ",") != strings.Join(beforeTopOrder, ",") {
+		t.Fatalf("install changed top-level order: before %#v after %#v\n%s", beforeTopOrder, installedTopOrder, installed)
+	}
 	res, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(home)})
 	if err != nil || len(res.Removed) != 1 {
 		t.Fatalf("Uninstall err = %v removed = %#v", err, res.Removed)
 	}
+	after := readFile(t, path)
+	afterTopOrder := jsonObjectKeyOrder(t, []byte(after))
+	if strings.Join(afterTopOrder, ",") != strings.Join(beforeTopOrder, ",") {
+		t.Fatalf("uninstall changed top-level order: before %#v after %#v\n%s", beforeTopOrder, afterTopOrder, after)
+	}
+	afterServersOrder := jsonObjectValueKeyOrder(t, []byte(after), "mcpServers")
+	if strings.Join(afterServersOrder, ",") != strings.Join(beforeServersOrder, ",") {
+		t.Fatalf("uninstall changed server order: before %#v after %#v\n%s", beforeServersOrder, afterServersOrder, after)
+	}
 	data := readJSON(t, path)
 	servers := data["mcpServers"].(map[string]any)
-	if servers["renamed"] != nil || servers["keep"] == nil || data["otherKey"] != float64(1) {
-		t.Fatalf("after uninstall data = %#v, want keep and otherKey preserved with renamed gone", data)
+	if servers["renamed"] != nil || servers["keep"] == nil || servers["later"] == nil || data["aaa"] != float64(1) || data["zzz"] == nil {
+		t.Fatalf("after uninstall data = %#v, want keep, later, aaa, and zzz preserved with renamed gone", data)
 	}
 }
 
@@ -1070,6 +1085,47 @@ func readJSON(t *testing.T, path string) map[string]any {
 		t.Fatalf("json parse %q: %v", path, err)
 	}
 	return data
+}
+
+func jsonObjectValueKeyOrder(t *testing.T, raw []byte, key string) []string {
+	t.Helper()
+	span, found, err := findTopLevelObjectValue(raw, key)
+	if err != nil {
+		t.Fatalf("find value %q: %v", key, err)
+	}
+	if !found {
+		t.Fatalf("value %q not found in %s", key, raw)
+	}
+	return jsonObjectKeyOrder(t, raw[span.start:span.end])
+}
+
+func jsonObjectKeyOrder(t *testing.T, raw []byte) []string {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	tok, err := dec.Token()
+	if err != nil {
+		t.Fatalf("read object start from %s: %v", raw, err)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		t.Fatalf("raw is not JSON object: %s", raw)
+	}
+	keys := []string{}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			t.Fatalf("read object key from %s: %v", raw, err)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			t.Fatalf("object key is %T, want string", keyTok)
+		}
+		keys = append(keys, key)
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			t.Fatalf("skip value for %q from %s: %v", key, raw, err)
+		}
+	}
+	return keys
 }
 
 func assertMode0600(t *testing.T, path string) {

@@ -800,19 +800,20 @@ func buildJSONRemoval(path string, key string, zedHint bool, name string) ([]byt
 	if !ok {
 		return nil, false, fmt.Errorf("existing config %s is not a JSON object", path)
 	}
-	serversRaw, ok := object[key]
-	if !ok {
-		return nil, false, nil
+	if servers, ok := object[key]; ok {
+		if _, ok := servers.(map[string]any); !ok {
+			return nil, false, fmt.Errorf("existing config %s has non-object %q", path, key)
+		}
 	}
-	servers, ok := serversRaw.(map[string]any)
-	if !ok {
-		return nil, false, fmt.Errorf("existing config %s has non-object %q", path, key)
+	keyRange, found, err := findTopLevelObjectValue(raw, key)
+	if err != nil || !found {
+		return nil, false, err
 	}
-	if _, ok := servers[name]; !ok {
-		return nil, false, nil
+	serverRange, serverFound, err := findTopLevelObjectMemberInRange(raw, name, keyRange)
+	if err != nil || !serverFound {
+		return nil, false, err
 	}
-	delete(servers, name)
-	updated, err := marshalJSON(object)
+	updated, err := removeObjectMember(raw, keyRange, serverRange)
 	if err != nil {
 		return nil, false, err
 	}
@@ -879,6 +880,93 @@ func mapHasStringValue(v any) bool {
 		}
 	}
 	return false
+}
+
+func findTopLevelObjectMemberInRange(raw []byte, key string, bounds byteRange) (byteRange, bool, error) {
+	if bounds.start < 0 || bounds.end > len(raw) || bounds.start >= bounds.end {
+		return byteRange{}, false, errors.New("invalid JSON object range")
+	}
+	base := bounds.start
+	section := raw[bounds.start:bounds.end]
+	span, found, err := findTopLevelObjectMemberInSection(section, key)
+	if err != nil || !found {
+		return byteRange{}, found, err
+	}
+	return byteRange{start: base + span.start, end: base + span.end}, true, nil
+}
+
+func findTopLevelObjectMemberInSection(raw []byte, key string) (byteRange, bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return byteRange{}, false, err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return byteRange{}, false, errors.New("existing config is not a JSON object")
+	}
+	for dec.More() {
+		beforeKey := int(dec.InputOffset())
+		keyTok, err := dec.Token()
+		if err != nil {
+			return byteRange{}, false, err
+		}
+		keyString, ok := keyTok.(string)
+		if !ok {
+			return byteRange{}, false, errors.New("JSON object key is not a string")
+		}
+		keyStart, err := nextJSONStringStart(raw, beforeKey)
+		if err != nil {
+			return byteRange{}, false, err
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return byteRange{}, false, err
+		}
+		valueEnd := int(dec.InputOffset())
+		if keyString == key {
+			return byteRange{start: keyStart, end: valueEnd}, true, nil
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return byteRange{}, false, err
+	}
+	return byteRange{}, false, nil
+}
+
+func nextJSONStringStart(raw []byte, offset int) (int, error) {
+	for i := offset; i < len(raw); i++ {
+		switch raw[i] {
+		case ' ', '\n', '\r', '\t', ',', '{':
+			continue
+		case '"':
+			return i, nil
+		default:
+			return 0, errors.New("could not locate JSON object key start")
+		}
+	}
+	return 0, errors.New("could not locate JSON object key start")
+}
+
+func removeObjectMember(raw []byte, objectRange byteRange, memberRange byteRange) ([]byte, error) {
+	if objectRange.start < 0 || objectRange.end > len(raw) || memberRange.start < objectRange.start || memberRange.end > objectRange.end {
+		return nil, errors.New("invalid JSON removal range")
+	}
+	before := memberRange.start
+	for before > objectRange.start+1 && isSpace(raw[before-1]) {
+		before--
+	}
+	if before > objectRange.start+1 && raw[before-1] == ',' {
+		return replaceRange(raw, before-1, memberRange.end, nil), nil
+	}
+	after := memberRange.end
+	for after < objectRange.end-1 && isSpace(raw[after]) {
+		after++
+	}
+	if after < objectRange.end-1 && raw[after] == ',' {
+		return replaceRange(raw, memberRange.start, after+1, nil), nil
+	}
+	return replaceRange(raw, memberRange.start, memberRange.end, nil), nil
 }
 
 func findTopLevelObjectValueInSection(raw []byte, key string) (byteRange, bool, error) {
