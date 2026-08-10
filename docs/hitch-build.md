@@ -194,11 +194,20 @@ Gemini CLI path: `~/.gemini/settings.json`; it does not honour XDG for this path
 config-dir override was found. `GEMINI_CONFIG_DIR` appears in its test harness, not in the resolver.
 Source: `google-gemini/gemini-cli` `packages/core/src/config/storage.ts getGlobalSettingsPath()`.
 
+Evidence tiers used in this matrix:
+
+| Tier | Meaning |
+|---|---|
+| SOURCE-VERIFIED | Verified by reading the client's public source schema, resolver, or loader. |
+| ARTIFACT-INSPECTED | Verified by reading a shipped closed-source artifact. This is stronger than vendor docs because it confirms behavior in a real build, but weaker than SOURCE-VERIFIED because the artifact may be minified, pinned to the locally installed version, and have no stable citable URL. |
+| VENDOR-DOCUMENTED | Verified from vendor docs for a client whose source/resolver is not publicly available or was not found. |
+| INHERITED-UNVERIFIED | Neither source, shipped artifact, nor vendor docs were found; the entry is intentionally called out instead of laundered into a verified tier. |
+
 Path evidence tiers:
 
 | Client | Tier | Citation | Limitation |
 |---|---|---|---|
-| Claude Code | SOURCE-VERIFIED | already verified in PR1; `CLAUDE_CONFIG_DIR` handled | Resolver source checked. |
+| Claude Code | ARTIFACT-INSPECTED | Installed `@anthropic-ai/claude-code` bundle version 1.0.51 at `/Users/edgrosvenor/.npm-global/lib/node_modules/@anthropic-ai/claude-code`: `cli.js` builds the config file as `$CLAUDE_CONFIG_DIR/.claude.json` else `~/.claude.json`, and the marker dir as `$CLAUDE_CONFIG_DIR` else `~/.claude`. | Closed-source shipped bundle; minified, pinned to the locally installed version, and no stable citable URL. |
 | Codex | SOURCE-VERIFIED | `openai/codex` `codex-rs/core/src/config/mod.rs` | Resolver source checked; docs omit `CODEX_HOME`. |
 | Zed | SOURCE-VERIFIED | `zed-industries/zed` `crates/paths/src/paths.rs` | Resolver source checked; docs do not state the macOS/XDG distinction. |
 | VS Code | SOURCE-VERIFIED | `microsoft/vscode` `src/vs/platform/environment/node/userDataPath.ts` | Resolver source checked, except `--user-data-dir` is CLI runtime state and not applicable to hitch. |
@@ -248,7 +257,7 @@ Same clients, different shape. Do not carry remote URL key names into stdio entr
 
 | Client | Key | Entry shape | Tier | Citation | Limitation |
 |---|---|---|---|---|---|
-| Claude Code | `mcpServers` | `{command, args, env}` | VENDOR-DOCUMENTED | `docs.anthropic.com/en/docs/claude-code/mcp`, local stdio examples and plugin `.mcp.json` examples | Claude Code is closed source; docs also state entries with no `type` are read as stdio. |
+| Claude Code | `mcpServers` | `{command, args, env}` with optional `{type: "stdio"}` | ARTIFACT-INSPECTED | Installed `@anthropic-ai/claude-code` bundle version 1.0.51 at `/Users/edgrosvenor/.npm-global/lib/node_modules/@anthropic-ai/claude-code`: `cli.js` schema has `mcpServers: v.record(v.string(), ...)` with stdio variant `type: v.literal("stdio").optional()`, `command: v.string().min(1)`, `args: v.array(v.string()).default([])`, `env: v.record(v.string()).optional()`. | Closed-source shipped bundle; minified, pinned to the locally installed version, and no stable citable URL. |
 | Codex | `mcp_servers` | TOML manual only: `command`, `args`, `env`/env vars under `[mcp_servers.<name>]` | SOURCE-VERIFIED | `openai/codex` `codex-rs/core/src/config/config_tests.rs`, `codex-rs/core/src/config/mod.rs load_global_mcp_servers()` | hitch still does not write Codex TOML; it prints manual instructions. |
 | Cursor | `mcpServers` | `{type: "stdio", command, args, env}` | VENDOR-DOCUMENTED | `cursor.com/docs/context/mcp`, STDIO server configuration table | Closed source; examples omit `type`, but the field table marks `type` required for stdio. |
 | Windsurf | `mcpServers` | `{command, args, env}` | VENDOR-DOCUMENTED | `docs.devin.ai/desktop/cascade/mcp`, `mcp_config.json` examples | Closed source; docs also mention remote accepts `serverUrl` or `url`, which does not apply to stdio. |
