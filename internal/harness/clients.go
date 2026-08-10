@@ -21,6 +21,15 @@ type DetectionResult struct {
 	PromptTier bool
 }
 
+func FileWriterClientByID(id string) (Client, bool) {
+	for _, client := range FileWriterClients() {
+		if client.ID == id {
+			return client, true
+		}
+	}
+	return Client{}, false
+}
+
 func FileWriterClients() []Client {
 	return []Client{
 		{ID: "claude-code", Name: "Claude Code", ConfigPath: claudeCodeConfigPath, MarkerPath: claudeCodeMarkerPath},
@@ -30,7 +39,7 @@ func FileWriterClients() []Client {
 		{ID: "zed", Name: "Zed", ConfigPath: zedConfigPath},
 		{ID: "vscode", Name: "VS Code", ConfigPath: vsCodeConfigPath},
 		{ID: "gemini-cli", Name: "Gemini CLI", ConfigPath: geminiCLIConfigPath},
-		{ID: "opencode", Name: "opencode", ConfigPath: opencodeConfigPath},
+		{ID: "opencode", Name: "opencode", ConfigPath: opencodeConfigPath, MarkerPath: opencodeMarkerPath},
 	}
 }
 
@@ -115,6 +124,12 @@ func zedConfigPath(env Env) (string, error) {
 }
 
 func vsCodeConfigPath(env Env) (string, error) {
+	if env.VSCodePortable != "" {
+		return joinAbs("VSCODE_PORTABLE", env.VSCodePortable, "user-data", "User", "mcp.json")
+	}
+	if env.VSCodeAppData != "" {
+		return joinAbs("VSCODE_APPDATA", env.VSCodeAppData, "Code", "User", "mcp.json")
+	}
 	switch env.GOOS {
 	case "darwin":
 		return joinAbs("HOME or USERPROFILE", env.Home, "Library", "Application Support", "Code", "User", "mcp.json")
@@ -135,7 +150,17 @@ func geminiCLIConfigPath(env Env) (string, error) {
 }
 
 func opencodeConfigPath(env Env) (string, error) {
+	if env.OpencodeConfigDir != "" {
+		return joinAbs("OPENCODE_CONFIG_DIR", env.OpencodeConfigDir, "opencode.json")
+	}
 	return joinAbs(env.xdgConfigVar(), env.xdgConfigHome(), "opencode", "opencode.json")
+}
+
+func opencodeMarkerPath(env Env) (string, error) {
+	if env.OpencodeConfigDir != "" {
+		return requireAbs("OPENCODE_CONFIG_DIR", env.OpencodeConfigDir)
+	}
+	return joinAbs(env.xdgConfigVar(), env.xdgConfigHome(), "opencode")
 }
 
 func claudeDesktopMarkerPath(env Env) (string, error) {

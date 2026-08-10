@@ -8,12 +8,15 @@ import (
 )
 
 type Env struct {
-	Home            string
-	XDGConfigHome   string
-	AppData         string
-	ClaudeConfigDir string
-	CodexHome       string
-	GOOS            string
+	Home              string
+	XDGConfigHome     string
+	AppData           string
+	ClaudeConfigDir   string
+	CodexHome         string
+	OpencodeConfigDir string
+	VSCodePortable    string
+	VSCodeAppData     string
+	GOOS              string
 }
 
 func CurrentEnv() (Env, error) {
@@ -29,12 +32,15 @@ func currentEnv(homeFn func() (string, error), getenv func(string) string, goos 
 		return Env{}, fmt.Errorf("resolved HOME or USERPROFILE is not absolute: %q", home)
 	}
 	return Env{
-		Home:            home,
-		XDGConfigHome:   getenv("XDG_CONFIG_HOME"),
-		AppData:         getenv("APPDATA"),
-		ClaudeConfigDir: getenv("CLAUDE_CONFIG_DIR"),
-		CodexHome:       getenv("CODEX_HOME"),
-		GOOS:            goos,
+		Home:              home,
+		XDGConfigHome:     getenv("XDG_CONFIG_HOME"),
+		AppData:           getenv("APPDATA"),
+		ClaudeConfigDir:   getenv("CLAUDE_CONFIG_DIR"),
+		CodexHome:         getenv("CODEX_HOME"),
+		OpencodeConfigDir: getenv("OPENCODE_CONFIG_DIR"),
+		VSCodePortable:    getenv("VSCODE_PORTABLE"),
+		VSCodeAppData:     getenv("VSCODE_APPDATA"),
+		GOOS:              goos,
 	}, nil
 }
 

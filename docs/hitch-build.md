@@ -81,6 +81,24 @@ From the URL host: strip a leading `mcp.`, take the first remaining label.
 generic label (`api`, `www`, `app`, `server`), prompt for confirmation** rather than guessing.
 `--name` always wins. In `-y` mode an ambiguous inference is an error, not a guess.
 
+### URL and credential validation
+
+Remote install has a single pre-write validation gate. It runs after token/header resolution and before
+any config file is read for writing:
+
+- Scheme-less URLs normalize to `https://` instead of being rejected. `hitch install ballast.now/mcp
+  TOKEN` writes `https://ballast.now/mcp`; any user-facing success, confirmation, or dry-run text must
+  show the normalized URL so the user sees exactly what was or will be written.
+- URL validation is local only: absolute `http` or `https` URL, non-empty host, no network probing or
+  `/.well-known` discovery.
+- If any credential/header is present, public `http://` is refused because it would transmit the
+  credential in cleartext. `http://localhost`, `http://127.0.0.1`, and `http://[::1]` are allowed for
+  local development. Refusal is the default; an insecure escape hatch may only be additive.
+- Explicit credential sources are required to resolve to a non-empty value. Empty positional token,
+  empty `--token-stdin`, and unset or empty `--token-env` all fail before any file is touched.
+- An explicit `Authorization` header and bearer token input are mutually exclusive. Hitch must not
+  silently overwrite one credential with another.
+
 ---
 
 ## 3. The interactive model (core UX, not a nicety)
@@ -143,15 +161,18 @@ and getting any one of these wrong silently produces a config the client ignores
 |---|---|---|---|
 | Claude Code | `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`) | `mcpServers` | `{type: "http", url, headers}` |
 | Cursor | `~/.cursor/mcp.json` | `mcpServers` | `{url, headers}` |
-| Codex | `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | `mcp_servers` | `{url, bearer_token_env_var}` — **TOML** |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` | `{serverUrl, headers}` |
 | Zed | platform-specific `zed/settings.json` | `context_servers` | `{url, headers}` — **JSONC** |
 | VS Code | platform-specific `Code/User/mcp.json` | `servers` | `{type: "http", url, headers}` |
 | Gemini CLI | `~/.gemini/settings.json` | `mcpServers` | `{httpUrl, headers}` |
-| opencode | `~/.config/opencode/opencode.json` | `mcp` | `{type: "remote", url, headers}` |
+| opencode | `${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-~/.config}/opencode}/opencode.json` | `mcp` | `{type: "remote", url, headers}` |
 
 VS Code path: macOS `~/Library/Application Support/Code/User/mcp.json`; Windows
-`%APPDATA%/Code/User/mcp.json`; Linux `~/.config/Code/User/mcp.json`.
+`%APPDATA%/Code/User/mcp.json`; Linux `${XDG_CONFIG_HOME:-~/.config}/Code/User/mcp.json`.
+Before those platform defaults, VS Code honours `VSCODE_PORTABLE` as
+`$VSCODE_PORTABLE/user-data/User/mcp.json`, then `VSCODE_APPDATA` as
+`$VSCODE_APPDATA/Code/User/mcp.json`. Source: `microsoft/vscode`
+`src/vs/platform/environment/node/userDataPath.ts doGetUserDataPath()`.
 
 Codex path: defaults to `~/.codex/config.toml`, but `CODEX_HOME` overrides the state directory, so
 the config becomes `$CODEX_HOME/config.toml`. Source: `openai/codex`
@@ -164,14 +185,56 @@ Zed path: macOS `~/.config/zed/settings.json` and deliberately ignores `XDG_CONF
 hitch because Zed uses it verbatim with no `zed` suffix, and a partial implementation would be
 misleading.
 
+opencode path: defaults through `xdg-basedir` as
+`${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json`, including on macOS, but
+`OPENCODE_CONFIG_DIR` takes precedence and points directly at the directory containing
+`opencode.json`. Source: `sst/opencode` `packages/core/src/global.ts`.
+
+Gemini CLI path: `~/.gemini/settings.json`; it does not honour XDG for this path, and no production
+config-dir override was found. `GEMINI_CONFIG_DIR` appears in its test harness, not in the resolver.
+Source: `google-gemini/gemini-cli` `packages/core/src/config/storage.ts getGlobalSettingsPath()`.
+
+Path evidence tiers:
+
+| Client | Tier | Citation | Limitation |
+|---|---|---|---|
+| Claude Code | SOURCE-VERIFIED | already verified in PR1; `CLAUDE_CONFIG_DIR` handled | Resolver source checked. |
+| Codex | SOURCE-VERIFIED | `openai/codex` `codex-rs/core/src/config/mod.rs` | Resolver source checked; docs omit `CODEX_HOME`. |
+| Zed | SOURCE-VERIFIED | `zed-industries/zed` `crates/paths/src/paths.rs` | Resolver source checked; docs do not state the macOS/XDG distinction. |
+| VS Code | SOURCE-VERIFIED | `microsoft/vscode` `src/vs/platform/environment/node/userDataPath.ts` | Resolver source checked, except `--user-data-dir` is CLI runtime state and not applicable to hitch. |
+| Gemini CLI | SOURCE-VERIFIED | `google-gemini/gemini-cli` `packages/core/src/config/storage.ts` | Resolver source checked; no production override found. |
+| opencode | SOURCE-VERIFIED | `sst/opencode` `packages/core/src/global.ts` | Resolver source checked. |
+| Cursor | VENDOR-DOCUMENTED | `cursor.com/docs/context/mcp` | Closed source: the documented path can change silently without a resolver we can check, so this is not at parity with SOURCE-VERIFIED. |
+| Windsurf | VENDOR-DOCUMENTED | `docs.devin.ai/desktop/cascade/mcp` | Closed source: the documented path can change silently without a resolver we can check, so this is not at parity with SOURCE-VERIFIED. |
+
+INHERITED-UNVERIFIED is empty for the PR2 remote HTTP adapter matrix.
+
 ### Prompt-tier (recognized, deliberately not written)
 
 | Client | Why |
 |---|---|
+| Codex | The config is TOML. PR2 ships the seven JSON writers and reports manual Codex setup instead of risking a lossy TOML rewrite. |
 | Claude Desktop | MCP config is stdio-only; remote HTTP needs the `mcp-remote` proxy and a Node runtime. Writing a proxy entry would silently depend on local tooling. |
 | JetBrains | The MCP dialog has no Authorization-headers field. |
 
 These return honest instructions via `hitch prompt`, not a broken config.
+
+For PR2, Codex is also reported from `hitch install` when detected or explicitly selected. The exact
+wording must include `hitch cannot configure Codex automatically yet` plus manual TOML instructions
+using `[mcp_servers.<name>]`, `bearer_token_env_var = "HITCH_TOKEN_<NAME>"`, and an
+`export HITCH_TOKEN_<NAME>=...` command. Explicit `--client codex` exits non-zero after printing
+those instructions; auto-detected Codex does not fail otherwise-successful JSON writes.
+
+Failed TOML approaches in PR2, deliberately not kept:
+
+- Splicing between byte offsets deleted everything from hitch's table to EOF when the next header was
+  an array-of-tables.
+- Whole-document re-serialization destroyed all comments and formatting. It also silently shifted
+  TOML local date/time values by the host's UTC offset: `1979-05-27T07:32:00` became `05:32:00`, and
+  `local_date` lost a whole day. That failure is invisible under UTC, so CI could never catch it.
+- The line-scan span finder matched header text inside multi-line strings, deleting the closing
+  delimiter, and failed to match equivalent-but-differently-spelled table names like
+  `[mcp_servers.x]` versus `[mcp_servers."x"]`, producing files that no longer parse.
 
 ### Detection
 
@@ -243,12 +306,15 @@ Each PR is independently shippable and leaves `main` green.
 (gofmt + `go vet` + golangci-lint + `go test ./...`), README stub. Establishes the gate everything
 else is judged against.
 
-**PR2 — remote HTTP install (the core).** Adapter registry for all 8 file-writer clients, name
+**PR2 — remote HTTP install (the core).** Adapter registry for the 7 JSON file-writer clients, name
 inference, token resolution (argv / `--token-stdin` / `--token-env` / masked prompt), the
 interactive picker, `-y`/`--client`/`--dry-run`, atomic 0600 writes, refuse-to-clobber, honest
 multi-harness summary. **Table-driven tests per client against a temp HOME**, covering: fresh file,
 existing file with unrelated keys preserved, existing entry updated idempotently, malformed file
 refused, non-TTY without `-y` exits non-zero, token never appears in any output.
+
+Codex is intentionally split out of PR2's writable adapter set. Keep Codex detection and `CODEX_HOME`
+path handling, but surface it as manual/not-yet-implemented until a safe TOML editing strategy exists.
 
 **PR3 — stdio servers.** `--command` / `--args` / `--env` across the same matrix, with per-client
 stdio shapes verified against current docs. Same test depth.
