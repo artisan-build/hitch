@@ -2,6 +2,7 @@
 # Values are placeholders; structure mirrors a real-world config shape.
 profile = "placeholder-profile"
 approval_policy = "on-request"
+# Keep both offsets: they catch any future reserialization that normalizes datetimes.
 created_at = 2026-01-02T03:04:05+12:45
 updated_at = 2026-02-03T04:05:06-03:30
 

@@ -84,8 +84,8 @@ hitch uninstall stripe
 ```
 
 `scan` reports, for every client, whether the server is present, whether that entry holds a
-credential, and which configs it could not read. `uninstall` removes only that server's entry and
-leaves the rest of the file exactly as it was.
+credential, and which configs it could not read. `uninstall` either removes only that server's entry
+cleanly, or reports that it cannot verify the file and leaves it unchanged.
 
 ## Manual setup for the rest
 

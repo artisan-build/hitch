@@ -308,7 +308,7 @@ func TestInstallStdioExplicitCodexPrintsManualInstructionsAndFails(t *testing.T)
 	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); !os.IsNotExist(err) {
 		t.Fatalf("codex config was written, stat err = %v", err)
 	}
-	for _, want := range []string{"hitch cannot configure Codex automatically yet", "[mcp_servers.local-server]", "command = \"npx\"", "args = [\"-y\",\"@example/mcp\"]", "Set API_KEY"} {
+	for _, want := range []string{"hitch cannot configure Codex automatically yet", "hitch scan and uninstall can verify or remove it later", "[mcp_servers.local-server]", "command = \"npx\"", "args = [\"-y\",\"@example/mcp\"]", "Set API_KEY"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout missing %q: %q", want, stdout.String())
 		}
@@ -465,11 +465,32 @@ func TestInstallExplicitCodexPrintsManualInstructionsAndFails(t *testing.T) {
 	}
 	for _, want := range []string{
 		"hitch cannot configure Codex automatically yet",
+		"hitch scan and uninstall can verify or remove it later",
 		"[mcp_servers.example]",
 		"bearer_token_env_var = \"HITCH_TOKEN_EXAMPLE\"",
 		"export HITCH_TOKEN_EXAMPLE=YOUR_TOKEN",
 		"Not configured: Codex: hitch cannot configure Codex automatically yet",
 	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q: %q", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "tok_SENTINEL_codex") {
+		t.Fatalf("Codex manual output leaked token; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestInstallCodexManualInstructionsQuoteDottedNames(t *testing.T) {
+	home := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok_SENTINEL_codex", "--client", "codex", "--name", "a.b"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"[mcp_servers.\"a.b\"]", "hitch scan and uninstall can verify or remove it later"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout missing %q: %q", want, stdout.String())
 		}

@@ -242,6 +242,11 @@ still does not install Codex entries automatically. TOML removal parses with
 `github.com/pelletier/go-toml/v2/unstable`, uses parser-provided byte offsets, and splices exactly
 the matching server root plus its sub-tables without re-serializing the document.
 
+Test environment pins are only meaningful when the code under test reads the environment per call.
+The `GIT_*` pins are useful because each git invocation receives a fresh environment; `TZ` pins inside
+Go tests are not load-bearing for `time.Local`, which is cached after first use. Datetime preservation
+tests should use literal non-UTC offsets in fixtures rather than per-test `TZ` changes.
+
 Failed TOML approaches in PR2, deliberately not kept:
 
 - Splicing between byte offsets deleted everything from hitch's table to EOF when the next header was

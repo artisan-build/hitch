@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/artisan-build/hitch/internal/harness"
@@ -721,12 +722,12 @@ func isLocalhost(host string) bool {
 }
 
 func codexManualInstructions(name string, url string, envVar string) string {
-	return fmt.Sprintf("hitch cannot configure Codex automatically yet. Add this to Codex config manually:\n[mcp_servers.%s]\nurl = %q\nbearer_token_env_var = %q\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN", name, url, envVar, envVar)
+	return fmt.Sprintf("hitch cannot configure Codex automatically yet. Add this to Codex config manually; hitch scan and uninstall can verify or remove it later:\n[%s]\nurl = %q\nbearer_token_env_var = %q\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN", codexServerTableHeader(name), url, envVar, envVar)
 }
 
 func codexStdioManualInstructions(name string, command string, args []string, env map[string]string) string {
 	var b strings.Builder
-	_, _ = fmt.Fprintf(&b, "hitch cannot configure Codex automatically yet. Add this to Codex config manually:\n[mcp_servers.%s]\ncommand = %q\n", name, command)
+	_, _ = fmt.Fprintf(&b, "hitch cannot configure Codex automatically yet. Add this to Codex config manually; hitch scan and uninstall can verify or remove it later:\n[%s]\ncommand = %q\n", codexServerTableHeader(name), command)
 	if len(args) > 0 {
 		encoded, _ := json.Marshal(args)
 		_, _ = fmt.Fprintf(&b, "args = %s\n", encoded)
@@ -735,6 +736,21 @@ func codexStdioManualInstructions(name string, command string, args []string, en
 		_, _ = fmt.Fprintf(&b, "# Set %s in the Codex server environment.\n", key)
 	}
 	return b.String()
+}
+
+func codexServerTableHeader(name string) string {
+	return "mcp_servers." + tomlKeySegment(name)
+}
+
+func CodexServerTableHeader(name string) string {
+	return codexServerTableHeader(name)
+}
+
+func tomlKeySegment(key string) string {
+	if regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(key) {
+		return key
+	}
+	return strconv.Quote(key)
 }
 
 func resolveTargets(opts Options) ([]Target, bool, error) {
@@ -1120,6 +1136,7 @@ type codexExpression struct {
 	kind            unstable.Kind
 	path            []string
 	start           int
+	headerStart     int
 	end             int
 	holdsCredential bool
 }
@@ -1149,6 +1166,9 @@ func findCodexServer(raw []byte, path string, name string) (codexServerEntry, er
 	if err != nil {
 		return codexServerEntry{}, err
 	}
+	if err := validateCodexMCPServerShapes(path, expressions); err != nil {
+		return codexServerEntry{}, err
+	}
 	var found []codexExpression
 	serverHasCredential := map[string]bool{}
 	for _, expr := range expressions {
@@ -1171,7 +1191,7 @@ func findCodexServer(raw []byte, path string, name string) (codexServerEntry, er
 	if name == "" {
 		return codexServerEntry{found: true, holdsCredential: serverHasCredential[found[0].path[1]]}, nil
 	}
-	if len(found) > 1 {
+	if countCodexRoots(found, name) > 1 {
 		return codexServerEntry{}, fmt.Errorf("existing Codex config %s has multiple mcp_servers entries named %q; cannot verify", path, name)
 	}
 	root := found[0]
@@ -1197,12 +1217,12 @@ func parseCodexExpressions(raw []byte, path string) ([]codexExpression, error) {
 			if err != nil {
 				return nil, err
 			}
-			start, err := tomlTableHeaderStart(raw, firstKeyOffset)
+			headerStart, err := tomlTableHeaderStart(raw, firstKeyOffset)
 			if err != nil {
 				return nil, fmt.Errorf("existing Codex config %s has unreadable TOML table range: %w", path, err)
 			}
 			currentTable = append([]string{}, keyPath...)
-			expressions = append(expressions, codexExpression{kind: node.Kind, path: keyPath, start: start, end: start})
+			expressions = append(expressions, codexExpression{kind: node.Kind, path: keyPath, start: tomlOwnedTableStart(raw, headerStart), headerStart: headerStart, end: headerStart})
 		case unstable.KeyValue:
 			keyPath, _, err := tomlKeyPath(node)
 			if err != nil {
@@ -1215,8 +1235,9 @@ func parseCodexExpressions(raw []byte, path string) ([]codexExpression, error) {
 				kind:            node.Kind,
 				path:            keyPath,
 				start:           int(node.Raw.Offset),
+				headerStart:     int(node.Raw.Offset),
 				end:             int(node.Raw.Offset + node.Raw.Length),
-				holdsCredential: codexNodeHoldsCredential(node),
+				holdsCredential: codexNodeHoldsCredential(keyPath, node),
 			})
 		}
 	}
@@ -1224,6 +1245,50 @@ func parseCodexExpressions(raw []byte, path string) ([]codexExpression, error) {
 		return nil, fmt.Errorf("existing Codex config %s is not valid TOML: %w", path, err)
 	}
 	return expressions, nil
+}
+
+func validateCodexMCPServerShapes(path string, expressions []codexExpression) error {
+	roots := map[string]bool{}
+	for _, expr := range expressions {
+		if isCodexServerRoot(expr) {
+			if roots[expr.path[1]] {
+				return fmt.Errorf("existing Codex config %s has multiple mcp_servers entries named %q; cannot verify", path, expr.path[1])
+			}
+			roots[expr.path[1]] = true
+		}
+	}
+	for _, expr := range expressions {
+		if len(expr.path) == 0 || expr.path[0] != "mcp_servers" {
+			continue
+		}
+		if len(expr.path) == 1 {
+			if expr.kind == unstable.Table {
+				continue
+			}
+			return fmt.Errorf("existing Codex config %s has unrecognized mcp_servers TOML shape; cannot verify or remove", path)
+		}
+		if expr.kind == unstable.ArrayTable {
+			return fmt.Errorf("existing Codex config %s has unrecognized mcp_servers TOML shape; cannot verify or remove", path)
+		}
+		if isCodexServerRoot(expr) {
+			continue
+		}
+		if len(expr.path) > 2 && roots[expr.path[1]] {
+			continue
+		}
+		return fmt.Errorf("existing Codex config %s has unrecognized mcp_servers TOML shape; cannot verify or remove", path)
+	}
+	return nil
+}
+
+func countCodexRoots(expressions []codexExpression, name string) int {
+	count := 0
+	for _, expr := range expressions {
+		if isCodexServerRoot(expr) && expr.path[1] == name {
+			count++
+		}
+	}
+	return count
 }
 
 func tomlKeyPath(node *unstable.Node) ([]string, int, error) {
@@ -1259,6 +1324,42 @@ func tomlTableHeaderStart(raw []byte, firstKeyOffset int) (int, error) {
 	return 0, errors.New("could not anchor table header from parser key range")
 }
 
+func tomlOwnedTableStart(raw []byte, headerStart int) int {
+	// A contiguous comment block immediately above a table header belongs to that header.
+	// Removing the table must remove its own comment block, and preserving the following
+	// table must preserve the following table's comment block.
+	start := headerStart
+	lineStart := previousLineStart(raw, start)
+	for lineStart >= 0 && tomlLineIsComment(raw[lineStart:start]) {
+		start = lineStart
+		if lineStart == 0 {
+			break
+		}
+		lineStart = previousLineStart(raw, lineStart)
+	}
+	return start
+}
+
+func previousLineStart(raw []byte, pos int) int {
+	if pos <= 0 || pos > len(raw) {
+		return -1
+	}
+	end := pos - 1
+	if end > 0 && raw[end-1] == '\r' && raw[end] == '\n' {
+		end--
+	}
+	for end > 0 && raw[end-1] != '\n' && raw[end-1] != '\r' {
+		end--
+	}
+	return end
+}
+
+func tomlLineIsComment(line []byte) bool {
+	line = bytes.TrimRight(line, "\r\n")
+	line = bytes.TrimLeft(line, " \t")
+	return len(line) > 0 && line[0] == '#'
+}
+
 func isCodexServerRoot(expr codexExpression) bool {
 	return len(expr.path) == 2 && expr.path[0] == "mcp_servers" && (expr.kind == unstable.Table || expr.kind == unstable.KeyValue)
 }
@@ -1266,7 +1367,7 @@ func isCodexServerRoot(expr codexExpression) bool {
 func codexTableRemovalRange(expressions []codexExpression, root codexExpression, rawLen int) byteRange {
 	end := -1
 	for _, expr := range expressions {
-		if expr.start <= root.start {
+		if expr.headerStart <= root.headerStart {
 			continue
 		}
 		if hasTOMLPathPrefix(expr.path, root.path) {
@@ -1293,15 +1394,20 @@ func hasTOMLPathPrefix(path []string, prefix []string) bool {
 	return true
 }
 
-func codexNodeHoldsCredential(node *unstable.Node) bool {
-	keyPath, _, err := tomlKeyPath(node)
-	if err == nil && len(keyPath) > 0 && keyPath[len(keyPath)-1] == "bearer_token" {
+func codexNodeHoldsCredential(path []string, node *unstable.Node) bool {
+	if len(path) > 0 && path[len(path)-1] == "bearer_token" {
 		return true
 	}
-	return codexInlineTableHoldsCredential(node.Value())
+	if len(path) > 0 && credentialContainerKey(path[len(path)-1]) && codexNodeHasStringValue(node.Value()) {
+		return true
+	}
+	if len(path) >= 2 && credentialContainerKey(path[len(path)-2]) && codexNodeHasStringValue(node.Value()) {
+		return true
+	}
+	return codexInlineTableHoldsCredential(node.Value(), nil)
 }
 
-func codexInlineTableHoldsCredential(node *unstable.Node) bool {
+func codexInlineTableHoldsCredential(node *unstable.Node, path []string) bool {
 	if node == nil || node.Kind != unstable.InlineTable {
 		return false
 	}
@@ -1314,8 +1420,30 @@ func codexInlineTableHoldsCredential(node *unstable.Node) bool {
 		if err == nil && len(keyPath) > 0 && keyPath[len(keyPath)-1] == "bearer_token" {
 			return true
 		}
-		if codexInlineTableHoldsCredential(child.Value()) {
+		fullPath := append(append([]string{}, path...), keyPath...)
+		if len(fullPath) >= 2 && credentialContainerKey(fullPath[len(fullPath)-2]) && codexNodeHasStringValue(child.Value()) {
 			return true
+		}
+		if codexInlineTableHoldsCredential(child.Value(), fullPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexNodeHasStringValue(node *unstable.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case unstable.String:
+		return len(node.Data) > 0
+	case unstable.InlineTable:
+		for children := node.Children(); children.Next(); {
+			child := children.Node()
+			if child.Kind == unstable.KeyValue && codexNodeHasStringValue(child.Value()) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1451,7 +1579,7 @@ func holdsCredential(v any) bool {
 }
 
 func credentialContainerKey(key string) bool {
-	return strings.EqualFold(key, "headers") || strings.EqualFold(key, "env") || strings.EqualFold(key, "environment")
+	return strings.EqualFold(key, "headers") || strings.EqualFold(key, "http_headers") || strings.EqualFold(key, "env") || strings.EqualFold(key, "environment")
 }
 
 func mapHasStringValue(v any) bool {
