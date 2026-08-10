@@ -111,8 +111,8 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install <url|name> [token]",
 		Short: "Install a remote HTTP or stdio MCP server into selected harnesses",
-		Args: func(_ *cobra.Command, args []string) error {
-			if command != "" {
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("command") {
 				if len(args) != 1 {
 					return exitError{err: fmt.Errorf("stdio install requires <name> with --command"), code: 2}
 				}
@@ -132,7 +132,14 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			if err != nil {
 				return exitError{err: err, code: 2}
 			}
-			if command != "" {
+			stdioMode := cmd.Flags().Changed("command")
+			if stdioMode {
+				if strings.TrimSpace(command) == "" {
+					return exitError{err: fmt.Errorf("stdio install requires non-empty --command"), code: 2}
+				}
+				if cmd.Flags().Changed("name") {
+					return exitError{err: fmt.Errorf("stdio install uses positional <name>; --name is only valid for remote installs"), code: 2}
+				}
 				if len(headers) > 0 || tokenStdin || tokenEnv != "" {
 					return exitError{err: fmt.Errorf("stdio install cannot use --header, --token-stdin, or --token-env"), code: 2}
 				}
@@ -173,6 +180,9 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 					return silentExitError{err: err, code: 1}
 				}
 				return nil
+			}
+			if cmd.Flags().Changed("args") || len(envVars) > 0 {
+				return exitError{err: fmt.Errorf("remote install cannot use --args or --env; use --command for stdio installs"), code: 2}
 			}
 			normalizedURL, err := install.NormalizeRemoteURL(args[0])
 			if err != nil {

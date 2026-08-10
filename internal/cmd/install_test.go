@@ -176,27 +176,107 @@ func TestInstallStdioCLIParsesArgsEnvAndMasksEnvOnDryRun(t *testing.T) {
 	}
 }
 
-func TestInstallStdioCLIErrorPathsDoNotEchoEnvValues(t *testing.T) {
+func TestInstallModeSelectionRejectsEmptyCommandAndIgnoredFlags(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		args []string
+		name     string
+		args     []string
+		secret   string
+		wantCode int
+		wantErr  string
 	}{
-		{name: "invalid env", args: []string{"install", "local-server", "--command", "npx", "--env", "STDIO_ERROR_SENTINEL_SECRET", "--client", "cursor"}},
-		{name: "malformed config", args: []string{"install", "local-server", "--command", "npx", "--env", "API_KEY=STDIO_ERROR_SENTINEL_SECRET", "--client", "cursor"}},
+		{
+			name:     "empty command stays stdio and errors",
+			args:     []string{"install", "stripe", "--command", "", "--env", "API_KEY=MODE_SENTINEL_SECRET", "--yes", "--client", "cursor"},
+			secret:   "MODE_SENTINEL_SECRET",
+			wantCode: 2,
+			wantErr:  "non-empty --command",
+		},
+		{
+			name:     "remote rejects args",
+			args:     []string{"install", "https://mcp.example.test/mcp", "tok", "--args", "-y,@example/mcp", "--client", "cursor"},
+			wantCode: 2,
+			wantErr:  "remote install cannot use --args or --env",
+		},
+		{
+			name:     "remote rejects env",
+			args:     []string{"install", "https://mcp.example.test/mcp", "tok", "--env", "API_KEY=MODE_SENTINEL_SECRET", "--client", "cursor"},
+			secret:   "MODE_SENTINEL_SECRET",
+			wantCode: 2,
+			wantErr:  "remote install cannot use --args or --env",
+		},
+		{
+			name:     "stdio rejects name flag",
+			args:     []string{"install", "stdio-name", "--command", "npx", "--name", "ignored", "--client", "cursor"},
+			wantCode: 2,
+			wantErr:  "--name is only valid for remote installs",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
-			if tt.name == "malformed config" {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Main(tt.args, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String()+stderr.String(), tt.wantErr) {
+				t.Fatalf("output missing %q; stdout=%q stderr=%q", tt.wantErr, stdout.String(), stderr.String())
+			}
+			if tt.secret != "" && strings.Contains(stdout.String()+stderr.String(), tt.secret) {
+				t.Fatalf("mode selection leaked sentinel; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); !os.IsNotExist(err) {
+				t.Fatalf("config was written, stat err = %v", err)
+			}
+		})
+	}
+}
+
+func TestInstallStdioCLIEnvParsingCoversMalformedAndPositiveCases(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		envFlag     string
+		wantCode    int
+		wantDetail  string
+		wantKey     string
+		wantValue   string
+		writeBroken bool
+	}{
+		{name: "bare no equals", envFlag: "STDIO_ENV_SENTINEL_BARE", wantCode: 2, wantDetail: "invalid --env; use K=V"},
+		{name: "leading equals empty key", envFlag: "=STDIO_ENV_SENTINEL_EMPTY_KEY", wantCode: 2, wantDetail: "invalid --env; use K=V"},
+		{name: "whitespace empty key", envFlag: "   =STDIO_ENV_SENTINEL_WHITESPACE_KEY", wantCode: 2, wantDetail: "invalid --env; use K=V"},
+		{name: "whitespace no equals", envFlag: "  STDIO_ENV_SENTINEL_SPACE_NO_EQUALS  ", wantCode: 2, wantDetail: "invalid --env; use K=V"},
+		{name: "empty value positive", envFlag: "API_KEY=", wantCode: 0, wantDetail: "Configured ", wantKey: "API_KEY", wantValue: ""},
+		{name: "multiple equals positive", envFlag: "API_KEY=a=STDIO_ENV_SENTINEL_MULTI", wantCode: 0, wantDetail: "Configured ", wantKey: "API_KEY", wantValue: "a=STDIO_ENV_SENTINEL_MULTI"},
+		{name: "trim key positive", envFlag: " API_KEY =STDIO_ENV_SENTINEL_TRIMMED", wantCode: 0, wantDetail: "Configured ", wantKey: "API_KEY", wantValue: "STDIO_ENV_SENTINEL_TRIMMED"},
+		{name: "malformed config does not echo env", envFlag: "API_KEY=STDIO_ENV_SENTINEL_CONFIG", wantCode: 1, wantDetail: "Not configured: Cursor:", writeBroken: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tt.writeBroken {
 				writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{not-json", 0o600)
 			}
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
-			code := Main(tt.args, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
-			if code == 0 {
-				t.Fatalf("exit code = 0, want failure")
+			code := Main([]string{"install", "local-server", "--command", "npx", "--env", tt.envFlag, "--client", "cursor"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, tt.wantCode, stdout.String(), stderr.String())
 			}
-			if strings.Contains(stdout.String()+stderr.String(), "STDIO_ERROR_SENTINEL_SECRET") {
+			if strings.Contains(stdout.String()+stderr.String(), "STDIO_ENV_SENTINEL") {
 				t.Fatalf("stdio error leaked env value; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String()+stderr.String(), tt.wantDetail) {
+				t.Fatalf("output missing %q; stdout=%q stderr=%q", tt.wantDetail, stdout.String(), stderr.String())
+			}
+			if tt.wantCode == 0 {
+				server := onlyCursorServer(t, home)
+				if got := server["env"].(map[string]any)[tt.wantKey]; got != tt.wantValue {
+					t.Fatalf("env %q = %q, want %q", tt.wantKey, got, tt.wantValue)
+				}
+			} else if !tt.writeBroken {
+				if _, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); !os.IsNotExist(err) {
+					t.Fatalf("config was written, stat err = %v", err)
+				}
 			}
 		})
 	}

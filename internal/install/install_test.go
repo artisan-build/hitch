@@ -272,6 +272,25 @@ func TestInstallStdioDryRunMasksEnvValuesAndWritesNothing(t *testing.T) {
 	}
 }
 
+func TestInstallStdioOmitsEmptyArgsForZedUntaggedSchema(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := stdioOptions(testEnv(home), "zed")
+	opts.Args = nil
+	_, err := InstallStdio(opts)
+	if err != nil {
+		t.Fatalf("InstallStdio returned error: %v", err)
+	}
+	server := readJSON(t, expectedPath(home, "zed"))["context_servers"].(map[string]any)["renamed"].(map[string]any)
+	if _, ok := server["args"]; ok {
+		t.Fatalf("empty args key was written for Zed stdio entry: %#v", server)
+	}
+	if server["command"] != "npx" || server["env"] == nil {
+		t.Fatalf("stdio entry missing command or env positive controls: %#v", server)
+	}
+}
+
 func TestInstallStdioAndRemoteReplaceSameServerEntry(t *testing.T) {
 	t.Parallel()
 
