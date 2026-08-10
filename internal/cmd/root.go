@@ -185,6 +185,7 @@ func parseHeaders(values []string) (map[string]string, error) {
 			return nil, fmt.Errorf("invalid --header; use 'K: V'")
 		}
 		if !ok {
+			// With no delimiter, the text could be a key or a credential value; echoing it is guessing about a string that might be secret.
 			if candidate := strings.Fields(value); len(candidate) > 1 && strings.TrimSpace(candidate[0]) != "" {
 				return nil, fmt.Errorf("invalid --header for key %q; use 'K: V'", candidate[0])
 			}

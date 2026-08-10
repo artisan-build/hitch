@@ -89,17 +89,23 @@ func TestInstallCLIHidesTokenOnSuccessAndDryRun(t *testing.T) {
 	}
 }
 
-func TestInstallHeaderParseErrorDoesNotEchoSecret(t *testing.T) {
+func TestInstallHeaderParsingDoesNotEchoSecret(t *testing.T) {
 	for _, tt := range []struct {
-		name       string
-		header     string
-		secret     string
-		wantDetail string
+		name         string
+		header       string
+		secret       string
+		wantCode     int
+		wantDetail   string
+		wantNoDetail string
 	}{
-		{name: "empty key", header: ":SENTINEL_EMPTY_KEY", secret: "SENTINEL_EMPTY_KEY", wantDetail: "invalid --header; use 'K: V'"},
-		{name: "whitespace empty key", header: "  :SENTINEL_WHITESPACE_EMPTY_KEY", secret: "SENTINEL_WHITESPACE_EMPTY_KEY", wantDetail: "invalid --header; use 'K: V'"},
-		{name: "missing colon with key", header: "X-Api-Key SENTINEL_MISSING_COLON", secret: "SENTINEL_MISSING_COLON", wantDetail: "X-Api-Key"},
-		{name: "bare no delimiter", header: "SENTINEL_BARE_NO_DELIMITER", secret: "SENTINEL_BARE_NO_DELIMITER", wantDetail: "invalid --header; use 'K: V'"},
+		{name: "bare value no colon no whitespace", header: "SENTINEL_BARE_NO_DELIMITER", secret: "SENTINEL_BARE_NO_DELIMITER", wantCode: 2, wantDetail: "invalid --header; use 'K: V'", wantNoDetail: "for key"},
+		{name: "leading colon", header: ":SENTINEL_LEADING_COLON", secret: "SENTINEL_LEADING_COLON", wantCode: 2, wantDetail: "invalid --header; use 'K: V'", wantNoDetail: "for key"},
+		{name: "leading whitespace then colon", header: "  :SENTINEL_WHITESPACE_COLON", secret: "SENTINEL_WHITESPACE_COLON", wantCode: 2, wantDetail: "invalid --header; use 'K: V'", wantNoDetail: "for key"},
+		{name: "space separated no colon", header: "X-Api-Key SENTINEL_SPACE_NO_COLON", secret: "SENTINEL_SPACE_NO_COLON", wantCode: 2, wantDetail: "invalid --header for key \"X-Api-Key\"; use 'K: V'"},
+		{name: "empty key", header: ": SENTINEL_EMPTY_KEY", secret: "SENTINEL_EMPTY_KEY", wantCode: 2, wantDetail: "invalid --header; use 'K: V'", wantNoDetail: "for key"},
+		{name: "empty value", header: "X-SENTINEL-Empty:", secret: "SENTINEL", wantCode: 0, wantDetail: "Configured "},
+		{name: "multiple colons", header: "X-Multi-Colon: SENTINEL_MULTI:still-secret", secret: "SENTINEL_MULTI", wantCode: 0, wantDetail: "Configured "},
+		{name: "valid control", header: "X-Valid-Control: SENTINEL_VALID_VALUE", secret: "SENTINEL_VALID_VALUE", wantCode: 0, wantDetail: "Configured "},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -108,15 +114,17 @@ func TestInstallHeaderParseErrorDoesNotEchoSecret(t *testing.T) {
 			code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--client", "cursor", "--header", tt.header}, &stdout, &stderr, func() (harness.Env, error) {
 				return testEnv(home), nil
 			})
-			if code == 0 {
-				t.Fatalf("exit code = 0, want non-zero")
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, tt.wantCode, stdout.String(), stderr.String())
 			}
-			combined := stdout.String() + stderr.String()
-			if strings.Contains(combined, tt.secret) || strings.Contains(combined, tt.header) {
-				t.Fatalf("header parse error leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			if strings.Contains(stdout.String(), tt.secret) || strings.Contains(stderr.String(), tt.secret) {
+				t.Fatalf("header handling leaked sentinel; stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
-			if !strings.Contains(stderr.String(), tt.wantDetail) {
-				t.Fatalf("header parse error missing detail %q; stderr=%q", tt.wantDetail, stderr.String())
+			if tt.wantDetail != "" && !strings.Contains(stdout.String()+stderr.String(), tt.wantDetail) {
+				t.Fatalf("header handling missing detail %q; stdout=%q stderr=%q", tt.wantDetail, stdout.String(), stderr.String())
+			}
+			if tt.wantNoDetail != "" && strings.Contains(stdout.String()+stderr.String(), tt.wantNoDetail) {
+				t.Fatalf("header handling included forbidden detail %q; stdout=%q stderr=%q", tt.wantNoDetail, stdout.String(), stderr.String())
 			}
 		})
 	}
