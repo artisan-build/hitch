@@ -1,6 +1,7 @@
 package install
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -835,6 +836,48 @@ func TestUninstallAfterInstallOnCompactForeignConfigLeavesValidJSON(t *testing.T
 	servers := data["mcpServers"].(map[string]any)
 	if servers["renamed"] != nil || servers["keep"] == nil || servers["later"] == nil || data["aaa"] != float64(1) || data["zzz"] == nil {
 		t.Fatalf("after uninstall data = %#v, want keep, later, aaa, and zzz preserved with renamed gone", data)
+	}
+}
+
+func TestInstallThenUninstallLeavesForeignConfigByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		fixture []byte
+	}{
+		{
+			name:    "compact single line",
+			fixture: []byte("{\"zzz\":{\"nested\":{\"v\":true}},\"mcpServers\":{\"keep\":{\"url\":\"https://keep.test/mcp\"},\"later\":{\"url\":\"https://later.test/mcp\"}},\"aaa\":1}\n"),
+		},
+		{
+			name:    "custom indentation",
+			fixture: []byte("{\n  \"zzz\"       : {\n    \"nested\" : {\"v\": true}\n  },\n  \"mcpServers\": {\n    \"keep\" : {\n        \"url\" : \"https://keep.test/mcp\"\n    },\n    \"later\": {\"url\": \"https://later.test/mcp\"}\n  },\n  \"aaa\"       : 1\n}\n"),
+		},
+		{
+			name:    "no trailing newline",
+			fixture: []byte(`{"zzz":{"nested":{"v":true}},"mcpServers":{"keep":{"url":"https://keep.test/mcp"},"later":{"url":"https://later.test/mcp"}},"aaa":1}`),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			path := expectedPath(home, "cursor")
+			writeFile(t, path, string(tt.fixture), 0o600)
+			before := append([]byte(nil), tt.fixture...)
+
+			if _, err := InstallRemote(baseOptions(testEnv(home), "cursor")); err != nil {
+				t.Fatalf("InstallRemote returned error: %v", err)
+			}
+			res, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+			if err != nil || len(res.Removed) != 1 {
+				t.Fatalf("Uninstall err = %v removed = %#v", err, res.Removed)
+			}
+			after := []byte(readFile(t, path))
+			if !bytes.Equal(before, after) {
+				t.Fatalf("install-then-uninstall changed foreign config bytes\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
 	}
 }
 
