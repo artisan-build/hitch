@@ -1330,6 +1330,13 @@ func removeTOMLExpressionRange(raw []byte, span byteRange) []byte {
 	if end > len(raw) {
 		end = len(raw)
 	}
+	if end == len(raw) {
+		if lineBreakLen := precedingLineBreakLen(raw, start); lineBreakLen > 0 {
+			if precedingLineBreakLen(raw, start-lineBreakLen) > 0 {
+				start -= lineBreakLen
+			}
+		}
+	}
 	if end < len(raw) && (raw[end] == '\r' || raw[end] == '\n') {
 		if raw[end] == '\r' && end+1 < len(raw) && raw[end+1] == '\n' {
 			end += 2
@@ -1338,6 +1345,22 @@ func removeTOMLExpressionRange(raw []byte, span byteRange) []byte {
 		}
 	}
 	return replaceRange(raw, start, end, nil)
+}
+
+func precedingLineBreakLen(raw []byte, pos int) int {
+	if pos <= 0 || pos > len(raw) {
+		return 0
+	}
+	if raw[pos-1] == '\n' {
+		if pos >= 2 && raw[pos-2] == '\r' {
+			return 2
+		}
+		return 1
+	}
+	if raw[pos-1] == '\r' {
+		return 1
+	}
+	return 0
 }
 
 func RemoveEntry(path string, adapter Adapter, name string) (bool, error) {

@@ -1173,24 +1173,64 @@ func TestCodexRemovalLeavesParentTableAndRemovesSubtables(t *testing.T) {
 	}
 }
 
-func TestCodexRealConfigCopyRemovalPreservesNodeReplEnvAndDatetimes(t *testing.T) {
+func TestCodexEOFRemovalBoundaryLayoutsAreByteExact(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		before string
+		after  string
+	}{
+		{
+			name:   "leading blank at EOF",
+			before: "[a]\nx = 1\n\n[mcp_servers.zzs]\nurl = \"https://zzs.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\n",
+			after:  "[a]\nx = 1\n",
+		},
+		{
+			name:   "no leading blank at EOF",
+			before: "[a]\nx = 1\n[mcp_servers.zzs]\nurl = \"https://zzs.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\n",
+			after:  "[a]\nx = 1\n",
+		},
+		{
+			name:   "middle with following table",
+			before: "[a]\nx = 1\n\n[mcp_servers.zzs]\nurl = \"https://zzs.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\n\n[b]\ny = 2\n",
+			after:  "[a]\nx = 1\n\n[b]\ny = 2\n",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			path := filepath.Join(home, ".codex", "config.toml")
+			writeFile(t, path, tt.before, 0o600)
+			res, err := Uninstall(UninstallOptions{Name: "zzs", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+			if err != nil || len(res.Removed) != 1 {
+				t.Fatalf("Uninstall err = %v result = %#v, want removal", err, res)
+			}
+			if got := readFile(t, path); got != tt.after {
+				t.Fatalf("EOF boundary bytes mismatch\nwant:\n%q\ngot:\n%q", tt.after, got)
+			}
+		})
+	}
+}
+
+func TestCodexScrubbedFixtureRemovalPreservesNodeReplEnvAndDatetimes(t *testing.T) {
 	t.Setenv("TZ", "Pacific/Chatham")
 
-	livePath := filepath.Join(os.Getenv("HOME"), ".codex", "config.toml")
-	live, err := os.ReadFile(livePath)
+	fixturePath := filepath.Join("testdata", "codex-realistic-scrubbed.toml")
+	fixture, err := os.ReadFile(fixturePath)
 	if err != nil {
-		t.Skipf("maintainer Codex config fixture unavailable: %v", err)
+		t.Fatalf("read scrubbed Codex fixture: %v", err)
 	}
-	if len(live) != 3741 {
-		t.Skipf("maintainer Codex config size = %d, want 3741-byte fixture", len(live))
-	}
-	if !bytes.Contains(live, []byte("[mcp_servers.node_repl.env]")) || !bytes.Contains(live, []byte("computer-use")) {
-		t.Fatalf("real config fixture missing expected node_repl.env or computer-use positive controls")
+	assertScrubbedCodexFixture(t, fixture)
+	if !bytes.Contains(fixture, []byte("[mcp_servers.node_repl.env]")) || !bytes.Contains(fixture, []byte("computer-use")) {
+		t.Fatalf("scrubbed config fixture missing expected node_repl.env or computer-use positive controls")
 	}
 	home := t.TempDir()
 	path := filepath.Join(home, ".codex", "config.toml")
 	sentinel := "[mcp_servers.\"hitch-pr7-sentinel\"]\nurl = \"https://hitch-pr7-sentinel.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_HITCH_PR7_SENTINEL\"\n"
-	before := string(live) + sentinel
+	before := string(fixture) + sentinel
 	writeFile(t, path, before, 0o600)
 
 	scans, err := Scan(testEnv(home), "hitch-pr7-sentinel", []string{"codex"})
@@ -1204,22 +1244,80 @@ func TestCodexRealConfigCopyRemovalPreservesNodeReplEnvAndDatetimes(t *testing.T
 	if err != nil || len(res.Removed) != 1 {
 		t.Fatalf("Uninstall err = %v result = %#v, want sentinel removed", err, res)
 	}
-	if got := readFile(t, path); got != string(live) {
-		t.Fatalf("real-copy removal did not restore original bytes")
+	if got := readFile(t, path); got != string(fixture) {
+		t.Fatalf("scrubbed-fixture removal did not restore original bytes")
 	}
 	if !strings.Contains(readFile(t, path), "[mcp_servers.node_repl.env]") || !strings.Contains(readFile(t, path), "computer-use") {
-		t.Fatalf("real-copy removal damaged node_repl.env or computer-use")
+		t.Fatalf("scrubbed-fixture removal damaged node_repl.env or computer-use")
 	}
 
 	nodeCopyHome := t.TempDir()
 	nodeCopyPath := filepath.Join(nodeCopyHome, ".codex", "config.toml")
-	writeFile(t, nodeCopyPath, string(live), 0o600)
+	writeFile(t, nodeCopyPath, string(fixture), 0o600)
 	nodeRes, err := Uninstall(UninstallOptions{Name: "node_repl", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(nodeCopyHome)})
 	if err != nil || len(nodeRes.Removed) != 1 {
 		t.Fatalf("node_repl uninstall err = %v result = %#v, want removal", err, nodeRes)
 	}
 	if strings.Contains(readFile(t, nodeCopyPath), "[mcp_servers.node_repl.env]") {
 		t.Fatalf("node_repl.env sub-table survived node_repl removal")
+	}
+}
+
+func TestCodexLiveFixtureOptIn(t *testing.T) {
+	if os.Getenv("HITCH_LIVE_CODEX_FIXTURE") != "1" {
+		t.Skip("live Codex fixture not requested; set HITCH_LIVE_CODEX_FIXTURE=1")
+	}
+	t.Setenv("TZ", "Pacific/Chatham")
+
+	livePath := filepath.Join(os.Getenv("HOME"), ".codex", "config.toml")
+	live, err := os.ReadFile(livePath)
+	if err != nil {
+		t.Fatalf("read live Codex fixture: %v", err)
+	}
+	if !bytes.Contains(live, []byte("[mcp_servers.node_repl.env]")) || !bytes.Contains(live, []byte("computer-use")) {
+		t.Fatalf("live config fixture missing expected node_repl.env or computer-use positive controls")
+	}
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	sentinel := "[mcp_servers.\"hitch-pr7-sentinel\"]\nurl = \"https://hitch-pr7-sentinel.test/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_HITCH_PR7_SENTINEL\"\n"
+	writeFile(t, path, string(live)+sentinel, 0o600)
+	res, err := Uninstall(UninstallOptions{Name: "hitch-pr7-sentinel", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+	if err != nil || len(res.Removed) != 1 {
+		t.Fatalf("Uninstall err = %v result = %#v, want sentinel removed", err, res)
+	}
+	if got := readFile(t, path); got != string(live) {
+		t.Fatalf("live fixture removal did not restore original bytes")
+	}
+}
+
+func assertScrubbedCodexFixture(t *testing.T, fixture []byte) {
+	t.Helper()
+	text := string(fixture)
+	for _, required := range []string{
+		"created_at = 2026-01-02T03:04:05+12:45",
+		"updated_at = 2026-02-03T04:05:06-03:30",
+		"[mcp_servers.node_repl.env]",
+		"[mcp_servers.\"computer-use\"]",
+		"# This comment intentionally sits immediately above the following table header.\n[mcp_servers.placeholder_keep]",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("scrubbed fixture missing required structure %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"/Users/",
+		"/home/",
+		"/private/",
+		"ballast",
+		"solo",
+		"artisan-agency",
+		"node_repl_token",
+		"github.com",
+		"localhost",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("scrubbed fixture contains forbidden real-looking value %q", forbidden)
+		}
 	}
 }
 
