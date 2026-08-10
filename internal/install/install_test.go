@@ -1304,6 +1304,53 @@ func TestUnignoredProjectCredentialWriteWarnsRefusesAndLeavesTargetAbsent(t *tes
 	}
 }
 
+func TestUnignoredProjectStdioCredentialWriteWarnsRefusesAndLeavesTargetAbsent(t *testing.T) {
+	project := initGitRepo(t)
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	oldIgnored := projectPathIgnored
+	projectPathIgnored = func(harness.Env, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { projectPathIgnored = oldIgnored })
+	var out strings.Builder
+	opts := stdioOptions(projectEnv(project), "cursor")
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = true
+	opts.Stdout = &out
+	res, err := InstallStdio(opts)
+	if err == nil || len(res.Failures) != 1 {
+		t.Fatalf("InstallStdio err = %v failures = %#v, want refusal", err, res.Failures)
+	}
+	if !strings.Contains(out.String(), "WARNING") || !strings.Contains(out.String(), path) || strings.Contains(out.String(), "stdio-secret-value") {
+		t.Fatalf("warning output = %q, want path-only warning", out.String())
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("refused project stdio write created target, stat err = %v", statErr)
+	}
+}
+
+func TestProjectStdioWithoutCredentialSkipsGitignoreGuard(t *testing.T) {
+	project := initGitRepo(t)
+	path := filepath.Join(project, ".cursor", "mcp.json")
+	oldIgnored := projectPathIgnored
+	projectPathIgnored = func(harness.Env, string) (bool, error) {
+		t.Fatalf("stdio without env credentials should not check gitignore")
+		return false, nil
+	}
+	t.Cleanup(func() { projectPathIgnored = oldIgnored })
+	opts := stdioOptions(projectEnv(project), "cursor")
+	opts.StdioEnv = nil
+	opts.Project = true
+	opts.Yes = false
+	opts.NonTTY = true
+	res, err := InstallStdio(opts)
+	if err != nil {
+		t.Fatalf("InstallStdio returned error: %v", err)
+	}
+	if len(res.Written) != 1 || res.Written[0] != path {
+		t.Fatalf("written = %#v, want %s", res.Written, path)
+	}
+}
+
 func TestDeclinedProjectCredentialWriteLeavesExistingTargetByteIdentical(t *testing.T) {
 	project := initGitRepo(t)
 	path := filepath.Join(project, ".cursor", "mcp.json")
