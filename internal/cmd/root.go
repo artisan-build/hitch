@@ -418,21 +418,29 @@ func pickUninstallTargets(out io.Writer, name string, targets []install.ScanResu
 		selected = append(selected, option.ID)
 		options = append(options, huh.NewOption(option.Label, option.ID))
 	}
-	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title(fmt.Sprintf("Remove %q from which harnesses?", name)).Options(options...).Value(&selected)))
-	if err := form.Run(); err != nil {
+	if err := runUninstallPicker(name, options, &selected); err != nil {
 		return nil, err
 	}
-	chosenIDs := map[string]bool{}
-	for _, id := range selected {
-		chosenIDs[id] = true
+	return selectUninstallTargets(targets, unreadable, selected), nil
+}
+
+var runUninstallPicker = func(name string, options []huh.Option[string], selected *[]string) error {
+	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title(fmt.Sprintf("Remove %q from which harnesses?", name)).Options(options...).Value(selected)))
+	return form.Run()
+}
+
+func selectUninstallTargets(targets []install.ScanResult, _ []install.ScanResult, chosenIDs []string) []install.ScanResult {
+	chosen := map[string]bool{}
+	for _, id := range chosenIDs {
+		chosen[id] = true
 	}
-	chosen := make([]install.ScanResult, 0, len(selected))
+	selected := make([]install.ScanResult, 0, len(chosenIDs))
 	for _, target := range targets {
-		if chosenIDs[target.Client.ID] {
-			chosen = append(chosen, target)
+		if chosen[target.Client.ID] {
+			selected = append(selected, target)
 		}
 	}
-	return chosen, nil
+	return selected
 }
 
 func credentialLabel(holds bool) string {

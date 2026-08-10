@@ -12,6 +12,7 @@ import (
 
 	"github.com/artisan-build/hitch/internal/harness"
 	installpkg "github.com/artisan-build/hitch/internal/install"
+	"github.com/charmbracelet/huh"
 )
 
 func TestInstallNonTTYWithoutYesOrClientExitsNonZeroAndWritesNothing(t *testing.T) {
@@ -932,6 +933,69 @@ func TestUninstallPickerModelSeparatesUnreadableFromSelectable(t *testing.T) {
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "Zed") || !strings.Contains(warnings[0], "unreadable") {
 		t.Fatalf("warnings = %#v, want zed unreadable warning", warnings)
+	}
+}
+
+func TestPickUninstallTargetsUsesModelAndFiltersUnreadableSelections(t *testing.T) {
+	targets := []installpkg.ScanResult{{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor"}, Path: "/tmp/cursor.json", HoldsCredential: true}}
+	unreadable := []installpkg.ScanResult{{Client: harness.DetectionResult{ID: "zed", Name: "Zed"}, Path: "/tmp/zed.json"}}
+	oldRun := runUninstallPicker
+	t.Cleanup(func() { runUninstallPicker = oldRun })
+	runUninstallPicker = func(name string, options []huh.Option[string], selected *[]string) error {
+		if name != "x" {
+			t.Fatalf("picker name = %q, want x", name)
+		}
+		if len(options) != 1 || options[0].Value != "cursor" || !strings.Contains(options[0].Key, "holds a credential") {
+			t.Fatalf("options = %#v, want only cursor option", options)
+		}
+		*selected = []string{"zed", "cursor"}
+		return nil
+	}
+	var out bytes.Buffer
+	selected, err := pickUninstallTargets(&out, "x", targets, unreadable)
+	if err != nil {
+		t.Fatalf("pickUninstallTargets returned error: %v", err)
+	}
+	if len(selected) != 1 || selected[0].Client.ID != "cursor" {
+		t.Fatalf("selected = %#v, want cursor only", selected)
+	}
+	if !strings.Contains(out.String(), "Zed") || !strings.Contains(out.String(), "unreadable") {
+		t.Fatalf("picker warnings output = %q, want unreadable zed warning", out.String())
+	}
+}
+
+func TestSelectUninstallTargetsHonorsChoicesAndExcludesUnreadable(t *testing.T) {
+	targets := []installpkg.ScanResult{
+		{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor"}, Path: "/tmp/cursor.json"},
+		{Client: harness.DetectionResult{ID: "gemini-cli", Name: "Gemini CLI"}, Path: "/tmp/gemini.json"},
+		{Client: harness.DetectionResult{ID: "opencode", Name: "opencode"}, Path: "/tmp/opencode.json"},
+	}
+	unreadable := []installpkg.ScanResult{
+		{Client: harness.DetectionResult{ID: "zed", Name: "Zed"}, Path: "/tmp/zed.json"},
+		{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor Unreadable"}, Path: "/tmp/unreadable-cursor.json"},
+	}
+	for _, tt := range []struct {
+		name      string
+		chosenIDs []string
+		wantIDs   string
+	}{
+		{name: "chosen only in target order", chosenIDs: []string{"opencode", "cursor"}, wantIDs: "cursor,opencode"},
+		{name: "unchecked target omitted", chosenIDs: []string{"gemini-cli"}, wantIDs: "gemini-cli"},
+		{name: "unreadable chosen id omitted", chosenIDs: []string{"zed", "cursor"}, wantIDs: "cursor"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			selected := selectUninstallTargets(targets, unreadable, tt.chosenIDs)
+			ids := make([]string, 0, len(selected))
+			for _, target := range selected {
+				ids = append(ids, target.Client.ID)
+				if strings.Contains(target.Path, "unreadable") || target.Client.ID == "zed" {
+					t.Fatalf("selected unreadable target: %#v", target)
+				}
+			}
+			if got := strings.Join(ids, ","); got != tt.wantIDs {
+				t.Fatalf("selected ids = %q, want %q", got, tt.wantIDs)
+			}
+		})
 	}
 }
 
