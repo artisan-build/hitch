@@ -50,11 +50,18 @@ type Options struct {
 
 type Result struct {
 	Name        string
+	URL         string
 	Written     []string
+	WrittenInfo []WriteInfo
 	WouldWrite  []string
 	Failures    []string
 	CodexEnvVar string
 	Manual      []string
+}
+
+type WriteInfo struct {
+	ClientName string
+	Path       string
 }
 
 func Adapters() []Adapter {
@@ -181,7 +188,7 @@ func InstallRemote(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	res := Result{Name: name, CodexEnvVar: CodexTokenEnvVar(name)}
+	res := Result{Name: name, URL: opts.URL, CodexEnvVar: CodexTokenEnvVar(name)}
 	if len(opts.Clients) == 0 {
 		if codexDetected(opts.Env) {
 			res.Manual = append(res.Manual, codexManualInstructions(name, opts.URL, res.CodexEnvVar))
@@ -218,6 +225,7 @@ func InstallRemote(opts Options) (Result, error) {
 			continue
 		}
 		res.Written = append(res.Written, target.Path)
+		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: target.Path})
 	}
 	if interactive && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
 		ids := make([]string, 0, len(targets))

@@ -229,6 +229,14 @@ func TestInstallURLCredentialGate(t *testing.T) {
 				if got := onlyCursorServer(t, home)["url"]; got != tt.wantURL {
 					t.Fatalf("url = %q, want %q", got, tt.wantURL)
 				}
+				if tt.url == "ballast.now/mcp" {
+					if !strings.Contains(stdout.String(), "Configured Cursor → https://ballast.now/mcp (") {
+						t.Fatalf("stdout missing normalized URL success line: %q", stdout.String())
+					}
+					if strings.Contains(stdout.String(), "→ ballast.now/mcp") {
+						t.Fatalf("stdout echoed raw scheme-less URL: %q", stdout.String())
+					}
+				}
 			} else if _, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); !os.IsNotExist(err) {
 				t.Fatalf("config was written, stat err = %v", err)
 			}
@@ -389,7 +397,7 @@ func TestInstallAutoDetectedCodexIsManualOnly(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); !os.IsNotExist(err) {
 		t.Fatalf("codex config was written, stat err = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "Configured "+filepath.Join(home, ".cursor", "mcp.json")) || !strings.Contains(stdout.String(), "hitch cannot configure Codex automatically yet") {
+	if !strings.Contains(stdout.String(), "Configured Cursor → https://mcp.example.test/mcp ("+filepath.Join(home, ".cursor", "mcp.json")+")") || !strings.Contains(stdout.String(), "hitch cannot configure Codex automatically yet") {
 		t.Fatalf("stdout missing configured cursor or Codex manual note: %q", stdout.String())
 	}
 }
@@ -534,7 +542,7 @@ func TestInstallPartialFailureContinuesAndSummarizesWrittenFiles(t *testing.T) {
 	if _, err := os.Stat(geminiPath); err != nil {
 		t.Fatalf("healthy harness was not written: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "Configured "+geminiPath) || !strings.Contains(stdout.String(), "Not configured: Cursor:") {
+	if !strings.Contains(stdout.String(), "Configured Gemini CLI → https://mcp.example.test/mcp ("+geminiPath+")") || !strings.Contains(stdout.String(), "Not configured: Cursor:") {
 		t.Fatalf("summary missing written path or failure: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }

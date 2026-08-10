@@ -87,8 +87,8 @@ Remote install has a single pre-write validation gate. It runs after token/heade
 any config file is read for writing:
 
 - Scheme-less URLs normalize to `https://` instead of being rejected. `hitch install ballast.now/mcp
-  TOKEN` writes `https://ballast.now/mcp`; any user-facing confirmation or dry-run text must show the
-  normalized URL so the user sees exactly what will be written.
+  TOKEN` writes `https://ballast.now/mcp`; any user-facing success, confirmation, or dry-run text must
+  show the normalized URL so the user sees exactly what was or will be written.
 - URL validation is local only: absolute `http` or `https` URL, non-empty host, no network probing or
   `/.well-known` discovery.
 - If any credential/header is present, public `http://` is refused because it would transmit the

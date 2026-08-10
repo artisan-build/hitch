@@ -285,9 +285,16 @@ func printInstallSummary(out io.Writer, result install.Result, dryRun bool) erro
 			}
 		}
 	} else {
-		for _, path := range result.Written {
-			if _, err := fmt.Fprintf(out, "Configured %s\n", path); err != nil {
+		for _, written := range result.WrittenInfo {
+			if _, err := fmt.Fprintf(out, "Configured %s → %s (%s)\n", written.ClientName, result.URL, written.Path); err != nil {
 				return err
+			}
+		}
+		if len(result.WrittenInfo) == 0 {
+			for _, path := range result.Written {
+				if _, err := fmt.Fprintf(out, "Configured %s (%s)\n", result.URL, path); err != nil {
+					return err
+				}
 			}
 		}
 	}
