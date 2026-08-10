@@ -1,0 +1,76 @@
+version: 2
+
+project_name: hitch
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hitch
+    main: .
+    binary: hitch
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/artisan-build/hitch/internal/cmd.Version={{ .Version }} -X github.com/artisan-build/hitch/internal/cmd.Commit={{ .Commit }} -X github.com/artisan-build/hitch/internal/cmd.Date={{ .Date }}
+
+archives:
+  - id: hitch
+    ids:
+      - hitch
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: artisan-build
+    name: hitch
+
+homebrew_casks:
+  - name: hitch
+    ids:
+      - hitch
+    binaries:
+      - hitch
+    repository:
+      owner: artisan-build
+      name: homebrew-tap
+      token: "{{ index .Env \"HOMEBREW_TAP_GITHUB_TOKEN\" }}"
+    directory: Casks
+    homepage: https://github.com/artisan-build/hitch
+    description: Install MCP servers into coding agents safely
+    license: MIT
+    skip_upload: "{{ if index .Env \"HOMEBREW_TAP_GITHUB_TOKEN\" }}false{{ else }}true{{ end }}"
+
+# GoReleaser's old Formula publisher is deprecated and fails `goreleaser check`, so the active
+# guarded Homebrew publisher above uses `homebrew_casks`. This is the deprecated formula shape that
+# PR6 originally requested for the `artisan-build/homebrew-tap` Formula directory; do not enable it
+# unless Ed explicitly chooses the deprecated path.
+# brews:
+#   - name: hitch
+#     ids:
+#       - hitch
+#     repository:
+#       owner: artisan-build
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     directory: Formula
+#     homepage: https://github.com/artisan-build/hitch
+#     description: Install MCP servers into coding agents safely
+#     license: MIT
+#     install: |
+#       bin.install "hitch"
+#     test: |
+#       system "#{bin}/hitch", "version"
