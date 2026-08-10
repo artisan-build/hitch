@@ -329,8 +329,8 @@ server. Tests must cover the unreadable-config path explicitly.
 **PR6 — distribution.** GoReleaser (darwin/linux × amd64/arm64, `CGO_ENABLED=0`), `release.yml`
 on `v*` tags, `install.sh` curl one-liner, Homebrew formula for `artisan-build/homebrew-tap`, and
 an `hitch-mcp` npm shim package that downloads the matching binary so `npx hitch-mcp <url> <token>`
-works. **Do not tag a release** — Ed tags versions himself, per standing policy. PR6 lands the
-machinery only.
+works. **v0.0.1 is authorized per-version, and Ed does the tagging** — not the implementer and not
+the coordinator. PR6 lands the machinery only.
 
 ---
 
@@ -352,4 +352,5 @@ machinery only.
 - `hitch uninstall <name>` removes every copy and reports anything it could not verify.
 - No path prints or logs a token. Grep the test output to prove it.
 - CI green: gofmt, `go vet`, golangci-lint, `go test ./...`.
-- README shows the one-liner install for brew, curl, and npx.
+- README shows the working install paths honestly. v0.0.1 supports curl and `go install`; brew and
+  npx remain guarded until their publisher secrets exist.

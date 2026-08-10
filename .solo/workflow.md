@@ -56,8 +56,8 @@ itself gets its own dedicated PR.
 - PR target repo: `artisan-build/hitch` (branch `main`)
 - release / distribution: GoReleaser → GitHub Releases, Homebrew tap, `install.sh`, npm shim
   (`hitch-mcp`). Built in PR6.
-- **DO NOT TAG A RELEASE.** Ed tags every version himself on explicit per-version approval. PR6
-  lands the release machinery only; it must not push a `v*` tag.
+- **DO NOT TAG A RELEASE.** v0.0.1 is authorized per-version, and Ed tags it himself. Implementers
+  and coordinators land the release machinery only; they must not create or push a `v*` tag.
 
 ## Plan & coordination
 - plan location: `docs/hitch-build.md` (authoritative PRD; 6 PRs).

@@ -3,8 +3,8 @@
 Install an MCP server into coding agents on your machine with one command, while handling the
 credential carefully.
 
-> **Status: pre-release.** The build is in progress; see [`docs/hitch-build.md`](docs/hitch-build.md)
-> for the spec. Install one-liners land in PR6.
+> **Status: pre-release.** v0.0.1 is the first installable release path. It supports `curl | sh`
+> and `go install`; Homebrew and npm publishing are wired but waiting on publisher tokens.
 
 ## What v0.0.1 Does
 
@@ -31,7 +31,28 @@ selected explicitly, hitch prints manual `[mcp_servers.<name>]` instructions usi
 
 Claude Desktop and JetBrains are recognized but deliberately not written to. See the spec for why.
 
-## Remote Install
+## Install hitch
+
+Install from the GitHub Release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/artisan-build/hitch/main/install.sh | sh
+```
+
+Install from source with Go:
+
+```sh
+go install github.com/artisan-build/hitch@v0.0.1
+```
+
+Coming soon:
+
+- Homebrew: the GoReleaser cask is configured for `artisan-build/homebrew-tap`, but publishing is
+  skipped until `HOMEBREW_TAP_GITHUB_TOKEN` is configured.
+- npm: the `hitch-mcp` shim package is configured, but publishing is skipped until `NPM_TOKEN` is
+  configured.
+
+## Remote MCP Install
 
 ```sh
 hitch install https://example.com/mcp --token-stdin -c claude-code
@@ -46,9 +67,9 @@ and saved in shell history. Prefer `--token-stdin` or `--token-env` for credenti
 go build ./...
 ```
 
-The current pre-release exposes `hitch version`, `hitch list`, and remote HTTP `hitch install` for
-the seven JSON-backed clients above. Scan, uninstall, stdio servers, Codex automatic setup, and
-packaged install one-liners are planned in later PRs.
+v0.0.1 exposes `hitch version`, `hitch list`, and remote HTTP `hitch install` for the seven
+JSON-backed clients above. Scan, uninstall, stdio servers, and Codex automatic setup are planned in
+later PRs.
 
 ## License
 
