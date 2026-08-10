@@ -1132,12 +1132,18 @@ type codexServerEntry struct {
 	rangeToRemove   byteRange
 }
 
+// codexExpression is one entry in the parser's ordered top-level expression
+// stream. anchor is the offset of the expression's first parser-reported token
+// (the raw range for key-values and comments, the first header key for
+// tables); lineEnd is the offset just past the expression's line terminator
+// (len of the document at EOF). Both are derived from parser ranges plus the
+// grammar's guarantee about what may sit between them on the same line;
+// nothing is located by scanning the document backwards.
 type codexExpression struct {
 	kind            unstable.Kind
 	path            []string
-	start           int
-	headerStart     int
-	end             int
+	anchor          int
+	lineEnd         int
 	holdsCredential bool
 }
 
@@ -1158,7 +1164,7 @@ func buildCodexRemoval(path string, name string) ([]byte, bool, error) {
 	if err != nil || !entry.found {
 		return nil, false, err
 	}
-	return removeTOMLExpressionRange(raw, entry.rangeToRemove), true, nil
+	return replaceRange(raw, entry.rangeToRemove.start, entry.rangeToRemove.end, nil), true, nil
 }
 
 func findCodexServer(raw []byte, path string, name string) (codexServerEntry, error) {
@@ -1169,9 +1175,9 @@ func findCodexServer(raw []byte, path string, name string) (codexServerEntry, er
 	if err := validateCodexMCPServerShapes(path, expressions); err != nil {
 		return codexServerEntry{}, err
 	}
-	var found []codexExpression
+	var found []int
 	serverHasCredential := map[string]bool{}
-	for _, expr := range expressions {
+	for i, expr := range expressions {
 		if len(expr.path) < 2 || expr.path[0] != "mcp_servers" {
 			continue
 		}
@@ -1181,7 +1187,7 @@ func findCodexServer(raw []byte, path string, name string) (codexServerEntry, er
 		}
 		if name == "" || serverName == name {
 			if isCodexServerRoot(expr) {
-				found = append(found, expr)
+				found = append(found, i)
 			}
 		}
 	}
@@ -1189,18 +1195,18 @@ func findCodexServer(raw []byte, path string, name string) (codexServerEntry, er
 		return codexServerEntry{}, nil
 	}
 	if name == "" {
-		return codexServerEntry{found: true, holdsCredential: serverHasCredential[found[0].path[1]]}, nil
+		return codexServerEntry{found: true, holdsCredential: serverHasCredential[expressions[found[0]].path[1]]}, nil
 	}
-	if countCodexRoots(found, name) > 1 {
+	if len(found) > 1 {
 		return codexServerEntry{}, fmt.Errorf("existing Codex config %s has multiple mcp_servers entries named %q; cannot verify", path, name)
 	}
-	root := found[0]
+	root := expressions[found[0]]
 	entry := codexServerEntry{found: true, holdsCredential: serverHasCredential[name] || root.holdsCredential}
-	if root.kind == unstable.KeyValue {
-		entry.rangeToRemove = byteRange{start: root.start, end: root.end}
-		return entry, nil
+	span, err := codexRemovalExtent(raw, expressions, found[0], path)
+	if err != nil {
+		return codexServerEntry{}, err
 	}
-	entry.rangeToRemove = codexTableRemovalRange(expressions, root, len(raw))
+	entry.rangeToRemove = span
 	return entry, nil
 }
 
@@ -1211,18 +1217,16 @@ func parseCodexExpressions(raw []byte, path string) ([]codexExpression, error) {
 	expressions := []codexExpression{}
 	for parser.NextExpression() {
 		node := parser.Expression()
+		expr := codexExpression{kind: node.Kind}
 		switch node.Kind {
 		case unstable.Table, unstable.ArrayTable:
 			keyPath, firstKeyOffset, err := tomlKeyPath(node)
 			if err != nil {
 				return nil, err
 			}
-			headerStart, err := tomlTableHeaderStart(raw, firstKeyOffset)
-			if err != nil {
-				return nil, fmt.Errorf("existing Codex config %s has unreadable TOML table range: %w", path, err)
-			}
 			currentTable = append([]string{}, keyPath...)
-			expressions = append(expressions, codexExpression{kind: node.Kind, path: keyPath, start: tomlOwnedTableStart(raw, headerStart), headerStart: headerStart, end: headerStart})
+			expr.path = keyPath
+			expr.anchor = firstKeyOffset
 		case unstable.KeyValue:
 			keyPath, _, err := tomlKeyPath(node)
 			if err != nil {
@@ -1231,15 +1235,20 @@ func parseCodexExpressions(raw []byte, path string) ([]codexExpression, error) {
 			if len(currentTable) > 0 {
 				keyPath = append(append([]string{}, currentTable...), keyPath...)
 			}
-			expressions = append(expressions, codexExpression{
-				kind:            node.Kind,
-				path:            keyPath,
-				start:           int(node.Raw.Offset),
-				headerStart:     int(node.Raw.Offset),
-				end:             int(node.Raw.Offset + node.Raw.Length),
-				holdsCredential: codexNodeHoldsCredential(keyPath, node),
-			})
+			expr.path = keyPath
+			expr.anchor = int(node.Raw.Offset)
+			expr.holdsCredential = codexNodeHoldsCredential(keyPath, node)
+		case unstable.Comment:
+			expr.anchor = int(node.Raw.Offset)
+		default:
+			return nil, fmt.Errorf("existing Codex config %s has an unsupported TOML expression; cannot verify", path)
 		}
+		lineEnd, err := tomlExpressionLineEnd(raw, node)
+		if err != nil {
+			return nil, fmt.Errorf("existing Codex config %s has unreadable TOML expression range: %w", path, err)
+		}
+		expr.lineEnd = lineEnd
+		expressions = append(expressions, expr)
 	}
 	if err := parser.Error(); err != nil {
 		return nil, fmt.Errorf("existing Codex config %s is not valid TOML: %w", path, err)
@@ -1281,16 +1290,6 @@ func validateCodexMCPServerShapes(path string, expressions []codexExpression) er
 	return nil
 }
 
-func countCodexRoots(expressions []codexExpression, name string) int {
-	count := 0
-	for _, expr := range expressions {
-		if isCodexServerRoot(expr) && expr.path[1] == name {
-			count++
-		}
-	}
-	return count
-}
-
 func tomlKeyPath(node *unstable.Node) ([]string, int, error) {
 	keys := []string{}
 	firstOffset := -1
@@ -1310,76 +1309,156 @@ func tomlKeyPath(node *unstable.Node) ([]string, int, error) {
 	return keys, firstOffset, nil
 }
 
-func tomlTableHeaderStart(raw []byte, firstKeyOffset int) (int, error) {
-	for i := firstKeyOffset - 1; i >= 0; i-- {
-		switch raw[i] {
-		case '[':
-			return i, nil
-		case ' ', '\t':
-			continue
-		default:
-			return 0, errors.New("could not anchor table header from parser key range")
+// tomlExpressionLineEnd returns the offset just past the expression's line
+// terminator, or len(raw) at EOF. It starts from the end of the expression's
+// last parser-reported token and consumes forward only what the grammar
+// allows on the rest of that line: the closing header bracket(s) implied by
+// the node kind, whitespace, and a trailing comment the parser already
+// attached as the expression's sibling node.
+func tomlExpressionLineEnd(raw []byte, node *unstable.Node) (int, error) {
+	pos := int(node.Raw.Offset + node.Raw.Length)
+	if node.Kind == unstable.Table || node.Kind == unstable.ArrayTable {
+		lastKeyEnd, err := tomlLastKeyEnd(node)
+		if err != nil {
+			return 0, err
+		}
+		pos, err = tomlConsumeHeaderClose(raw, lastKeyEnd, node.Kind)
+		if err != nil {
+			return 0, err
 		}
 	}
-	return 0, errors.New("could not anchor table header from parser key range")
+	if trailing := node.Next(); trailing != nil && trailing.Kind == unstable.Comment {
+		pos = int(trailing.Raw.Offset + trailing.Raw.Length)
+	}
+	pos = tomlSkipInlineSpace(raw, pos)
+	switch {
+	case pos == len(raw):
+		return pos, nil
+	case raw[pos] == '\n':
+		return pos + 1, nil
+	case raw[pos] == '\r' && pos+1 < len(raw) && raw[pos+1] == '\n':
+		return pos + 2, nil
+	}
+	return 0, errors.New("TOML expression is not followed by an end of line")
 }
 
-func tomlOwnedTableStart(raw []byte, headerStart int) int {
-	// A contiguous comment block immediately above a table header belongs to that header.
-	// Removing the table must remove its own comment block, and preserving the following
-	// table must preserve the following table's comment block.
-	start := headerStart
-	lineStart := previousLineStart(raw, start)
-	for lineStart >= 0 && tomlLineIsComment(raw[lineStart:start]) {
-		start = lineStart
-		if lineStart == 0 {
-			break
+func tomlLastKeyEnd(node *unstable.Node) (int, error) {
+	end := -1
+	for it := node.Key(); it.Next(); {
+		keyNode := it.Node()
+		end = int(keyNode.Raw.Offset + keyNode.Raw.Length)
+	}
+	if end < 0 {
+		return 0, errors.New("TOML table header has no key range")
+	}
+	return end, nil
+}
+
+func tomlConsumeHeaderClose(raw []byte, pos int, kind unstable.Kind) (int, error) {
+	pos = tomlSkipInlineSpace(raw, pos)
+	brackets := 1
+	if kind == unstable.ArrayTable {
+		brackets = 2
+	}
+	for i := 0; i < brackets; i++ {
+		if pos >= len(raw) || raw[pos] != ']' {
+			return 0, errors.New("TOML table header does not close where the parser reported its keys")
 		}
-		lineStart = previousLineStart(raw, lineStart)
+		pos++
 	}
-	return start
+	return pos, nil
 }
 
-func previousLineStart(raw []byte, pos int) int {
-	if pos <= 0 || pos > len(raw) {
-		return -1
+func tomlSkipInlineSpace(raw []byte, pos int) int {
+	for pos < len(raw) && (raw[pos] == ' ' || raw[pos] == '\t') {
+		pos++
 	}
-	end := pos - 1
-	if end > 0 && raw[end-1] == '\r' && raw[end] == '\n' {
-		end--
-	}
-	for end > 0 && raw[end-1] != '\n' && raw[end-1] != '\r' {
-		end--
-	}
-	return end
-}
-
-func tomlLineIsComment(line []byte) bool {
-	line = bytes.TrimRight(line, "\r\n")
-	line = bytes.TrimLeft(line, " \t")
-	return len(line) > 0 && line[0] == '#'
+	return pos
 }
 
 func isCodexServerRoot(expr codexExpression) bool {
 	return len(expr.path) == 2 && expr.path[0] == "mcp_servers" && (expr.kind == unstable.Table || expr.kind == unstable.KeyValue)
 }
 
-func codexTableRemovalRange(expressions []codexExpression, root codexExpression, rawLen int) byteRange {
-	end := -1
-	for _, expr := range expressions {
-		if expr.headerStart <= root.headerStart {
+// codexRemovalExtent bounds the entry rooted at expressions[rootIdx] purely
+// from the expression stream: the extent runs from the end of the last
+// expression before the entry's owned block to the end of the entry's last
+// descendant line, so every byte from the following expression's line onward
+// survives untouched. A contiguous comment block immediately above a table
+// header belongs to that header and is removed with it.
+func codexRemovalExtent(raw []byte, expressions []codexExpression, rootIdx int, path string) (byteRange, error) {
+	root := expressions[rootIdx]
+	blockStart := rootIdx
+	if root.kind == unstable.Table {
+		for blockStart > 0 {
+			prev := expressions[blockStart-1]
+			if prev.kind != unstable.Comment || !tomlExpressionsAdjacent(raw, prev, expressions[blockStart]) {
+				break
+			}
+			blockStart--
+		}
+	}
+	start := 0
+	if blockStart > 0 {
+		start = expressions[blockStart-1].lineEnd
+	}
+	end := root.lineEnd
+	next := len(expressions)
+	for i := rootIdx + 1; i < len(expressions); i++ {
+		expr := expressions[i]
+		if expr.kind == unstable.Comment {
 			continue
 		}
-		if hasTOMLPathPrefix(expr.path, root.path) {
-			continue
+		if !hasTOMLPathPrefix(expr.path, root.path) {
+			next = i
+			break
 		}
-		end = expr.start
-		break
+		end = expr.lineEnd
 	}
-	if end < 0 {
-		end = rawLen
+	for i := next; i < len(expressions); i++ {
+		if hasTOMLPathPrefix(expressions[i].path, root.path) {
+			return byteRange{}, fmt.Errorf("existing Codex config %s scatters mcp_servers entry %q across the file; cannot verify or remove", path, root.path[1])
+		}
 	}
-	return byteRange{start: root.start, end: end}
+	if blockStart == 0 {
+		// No expression precedes the entry, so there is no boundary to end the
+		// extent at on that side; the extent instead runs forward to the start
+		// of the following expression's line so the file does not begin with a
+		// leftover separator gap.
+		end = tomlConsumeBlankLines(raw, end)
+	}
+	return byteRange{start: start, end: end}, nil
+}
+
+// tomlConsumeBlankLines advances over whole blank lines (inline whitespace
+// followed by a line terminator) and returns the offset of the first line with
+// content, or len(raw) when only blank space remains.
+func tomlConsumeBlankLines(raw []byte, pos int) int {
+	for {
+		lineStart := pos
+		i := tomlSkipInlineSpace(raw, pos)
+		switch {
+		case i >= len(raw):
+			return len(raw)
+		case raw[i] == '\n':
+			pos = i + 1
+		case raw[i] == '\r' && i+1 < len(raw) && raw[i+1] == '\n':
+			pos = i + 2
+		default:
+			return lineStart
+		}
+	}
+}
+
+// tomlExpressionsAdjacent reports whether next starts on the line immediately
+// after prev. The gap between prev's line end and next's first parser-reported
+// token can hold only whitespace and header brackets, so the two are adjacent
+// exactly when that gap contains no line break.
+func tomlExpressionsAdjacent(raw []byte, prev codexExpression, next codexExpression) bool {
+	if prev.lineEnd > next.anchor {
+		return false
+	}
+	return !bytes.ContainsAny(raw[prev.lineEnd:next.anchor], "\r\n")
 }
 
 func hasTOMLPathPrefix(path []string, prefix []string) bool {
@@ -1447,48 +1526,6 @@ func codexNodeHasStringValue(node *unstable.Node) bool {
 		}
 	}
 	return false
-}
-
-func removeTOMLExpressionRange(raw []byte, span byteRange) []byte {
-	start := span.start
-	end := span.end
-	if start < 0 {
-		start = 0
-	}
-	if end > len(raw) {
-		end = len(raw)
-	}
-	if end == len(raw) {
-		if lineBreakLen := precedingLineBreakLen(raw, start); lineBreakLen > 0 {
-			if precedingLineBreakLen(raw, start-lineBreakLen) > 0 {
-				start -= lineBreakLen
-			}
-		}
-	}
-	if end < len(raw) && (raw[end] == '\r' || raw[end] == '\n') {
-		if raw[end] == '\r' && end+1 < len(raw) && raw[end+1] == '\n' {
-			end += 2
-		} else {
-			end++
-		}
-	}
-	return replaceRange(raw, start, end, nil)
-}
-
-func precedingLineBreakLen(raw []byte, pos int) int {
-	if pos <= 0 || pos > len(raw) {
-		return 0
-	}
-	if raw[pos-1] == '\n' {
-		if pos >= 2 && raw[pos-2] == '\r' {
-			return 2
-		}
-		return 1
-	}
-	if raw[pos-1] == '\r' {
-		return 1
-	}
-	return 0
 }
 
 func RemoveEntry(path string, adapter Adapter, name string) (bool, error) {

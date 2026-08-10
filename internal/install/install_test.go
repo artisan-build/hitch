@@ -1186,6 +1186,104 @@ func TestCodexArrayTableCannotCorruptFollowingArrayTable(t *testing.T) {
 	}
 }
 
+// TestCodexRemovalFollowingNeighbourSurvivesByteIdentical holds the one
+// property behind every splice defect seen so far: after removing our entry,
+// the content that follows it survives byte-identically — whatever it is. Each
+// row is before = head + gap + entry + neighbour and must produce exactly
+// head + neighbour: the separator gap and the entry (with any comment block it
+// owns) disappear, and not one byte of the neighbour or the head changes.
+func TestCodexRemovalFollowingNeighbourSurvivesByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	const head = "title = \"keep\"\n"
+	const gap = "\n"
+	const entry = "[mcp_servers.zzs]\nurl = \"https://zzs.invalid/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\n"
+	tests := []struct {
+		name      string
+		head      string
+		gap       string
+		entry     string
+		neighbour string
+	}{
+		{
+			name:      "comment block",
+			neighbour: "# neighbour comment one\n# neighbour comment two\n[tail]\nvalue = 1\n",
+		},
+		{
+			name:      "array of tables",
+			neighbour: "[[shortcuts]]\nname = \"build\"\n\n[[shortcuts]]\nname = \"test\"\n",
+		},
+		{
+			name:      "bare bracket line",
+			neighbour: "[tail]\n",
+		},
+		{
+			name:      "blank line run",
+			neighbour: "\n\n[tail]\nvalue = 1\n",
+		},
+		{
+			name:      "crlf document",
+			head:      "title = \"keep\"\r\n",
+			gap:       "\r\n",
+			entry:     "[mcp_servers.zzs]\r\nurl = \"https://zzs.invalid/mcp\"\r\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\r\n",
+			neighbour: "[[shortcuts]]\r\nname = \"build\"\r\n",
+		},
+		{
+			name:      "indented table",
+			neighbour: "  [tail]\n  value = 1\n",
+		},
+		{
+			name:      "another mcp_servers entry",
+			neighbour: "[mcp_servers.other]\nurl = \"https://other.invalid/mcp\"\n",
+		},
+		{
+			name:      "nothing at EOF",
+			neighbour: "",
+		},
+		{
+			name:      "comment owned by our entry, comment owned by neighbour",
+			entry:     "# comment owned by zzs\n[mcp_servers.zzs]\nurl = \"https://zzs.invalid/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\n",
+			neighbour: "# comment owned by tail\n[tail]\nvalue = 1\n",
+		},
+		{
+			name:      "floating comment above the gap is not owned",
+			head:      "title = \"keep\"\n\n# floating comment\n",
+			neighbour: "[tail]\nvalue = 1\n",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if tt.head == "" {
+				tt.head = head
+			}
+			if tt.gap == "" {
+				tt.gap = gap
+			}
+			if tt.entry == "" {
+				tt.entry = entry
+			}
+			before := tt.head + tt.gap + tt.entry + tt.neighbour
+			want := tt.head + tt.neighbour
+			home := t.TempDir()
+			path := filepath.Join(home, ".codex", "config.toml")
+			writeFile(t, path, before, 0o600)
+			res, err := Uninstall(UninstallOptions{Name: "zzs", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+			if err != nil || len(res.Removed) != 1 {
+				t.Fatalf("Uninstall err = %v result = %#v, want removal", err, res)
+			}
+			got := readFile(t, path)
+			if got != want {
+				t.Fatalf("neighbour did not survive byte-identically\nwant:\n%q\ngot:\n%q", want, got)
+			}
+			if !strings.HasSuffix(got, tt.neighbour) {
+				t.Fatalf("neighbour bytes changed\nneighbour:\n%q\ngot:\n%q", tt.neighbour, got)
+			}
+		})
+	}
+}
+
 func TestCodexDuplicateServerRootsAreUnreadableAndUnchanged(t *testing.T) {
 	t.Parallel()
 
