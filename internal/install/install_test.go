@@ -1553,6 +1553,48 @@ func TestCodexCredentialDetectionMatchesCredentialContainers(t *testing.T) {
 	}
 }
 
+func TestCodexScanWithoutNameReportsCredentialHeldByAnyServer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		body            string
+		holdsCredential bool
+	}{
+		{
+			name:            "credential in second of two",
+			body:            "[mcp_servers.first]\nurl = \"https://first.invalid/mcp\"\n\n[mcp_servers.second]\nurl = \"https://second.invalid/mcp\"\nbearer_token = \"SECOND_POSITION_SECRET\"\n",
+			holdsCredential: true,
+		},
+		{
+			name:            "credential in last of three",
+			body:            "[mcp_servers.first]\nurl = \"https://first.invalid/mcp\"\n\n[mcp_servers.second]\nurl = \"https://second.invalid/mcp\"\n\n[mcp_servers.third]\nurl = \"https://third.invalid/mcp\"\n\n[mcp_servers.third.env]\nAPI_TOKEN = \"LAST_POSITION_SECRET\"\n",
+			holdsCredential: true,
+		},
+		{
+			name:            "no server holds a credential",
+			body:            "[mcp_servers.first]\nurl = \"https://first.invalid/mcp\"\n\n[mcp_servers.second]\nurl = \"https://second.invalid/mcp\"\n",
+			holdsCredential: false,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			path := filepath.Join(home, ".codex", "config.toml")
+			writeFile(t, path, tt.body, 0o600)
+			scans, err := Scan(testEnv(home), "", []string{"codex"})
+			if err != nil {
+				t.Fatalf("Scan returned error: %v", err)
+			}
+			if len(scans) != 1 || scans[0].Status != ScanHasEntry || scans[0].HoldsCredential != tt.holdsCredential {
+				t.Fatalf("unnamed Codex scan = %#v, want has-entry with HoldsCredential = %v", scans, tt.holdsCredential)
+			}
+		})
+	}
+}
+
 func TestCodexServerNamePrefixDoesNotOverreach(t *testing.T) {
 	t.Parallel()
 
