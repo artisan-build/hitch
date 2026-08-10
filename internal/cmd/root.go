@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -103,11 +104,20 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	var headers []string
 	var name string
 	var forget bool
+	var command string
+	var argsCSV string
+	var envVars []string
 
 	cmd := &cobra.Command{
-		Use:   "install <url> [token]",
-		Short: "Install a remote HTTP MCP server into selected harnesses",
-		Args: func(_ *cobra.Command, args []string) error {
+		Use:   "install <url|name> [token]",
+		Short: "Install a remote HTTP or stdio MCP server into selected harnesses",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("command") {
+				if len(args) != 1 {
+					return exitError{err: fmt.Errorf("stdio install requires <name> with --command"), code: 2}
+				}
+				return nil
+			}
 			if len(args) < 1 || len(args) > 2 {
 				return exitError{err: fmt.Errorf("install requires <url> and optional [token]"), code: 2}
 			}
@@ -117,6 +127,65 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			env, err := envFn()
 			if err != nil {
 				return err
+			}
+			canonicalClients, err := normalizeClientIDs(clients)
+			if err != nil {
+				return exitError{err: err, code: 2}
+			}
+			stdioMode := cmd.Flags().Changed("command")
+			if stdioMode {
+				if strings.TrimSpace(command) == "" {
+					return exitError{err: fmt.Errorf("stdio install requires non-empty --command"), code: 2}
+				}
+				if strings.Contains(args[0], "://") {
+					return exitError{err: fmt.Errorf("stdio install requires a server name, not a URL; remove --command for remote installs"), code: 2}
+				}
+				if cmd.Flags().Changed("name") {
+					return exitError{err: fmt.Errorf("stdio install uses positional <name>; --name is only valid for remote installs"), code: 2}
+				}
+				if len(headers) > 0 || tokenStdin || tokenEnv != "" {
+					return exitError{err: fmt.Errorf("stdio install cannot use --header, --token-stdin, or --token-env"), code: 2}
+				}
+				parsedArgs, err := parseArgsCSV(argsCSV)
+				if err != nil {
+					return exitError{err: err, code: 2}
+				}
+				parsedEnv, err := parseEnvVars(envVars)
+				if err != nil {
+					return exitError{err: err, code: 2}
+				}
+				result, err := install.InstallStdio(install.Options{
+					Name:     args[0],
+					Command:  command,
+					Args:     parsedArgs,
+					StdioEnv: parsedEnv,
+					Clients:  canonicalClients,
+					Yes:      yes,
+					DryRun:   dryRun,
+					Forget:   forget,
+					NonTTY:   !isTerminal(cmd.InOrStdin()),
+					PickTargets: func(targets []install.Target, preferred map[string]bool) ([]install.Target, error) {
+						return pickTargets(args[0], targets, preferred)
+					},
+					Env:    env,
+					Stdout: cmd.OutOrStdout(),
+				})
+				if summaryErr := printInstallSummary(cmd.OutOrStdout(), result, dryRun); summaryErr != nil {
+					return summaryErr
+				}
+				if err != nil {
+					if len(result.Failures) > 0 && (len(result.Written) > 0 || len(result.WouldWrite) > 0) {
+						return nil
+					}
+					if len(result.Failures) == 0 {
+						return err
+					}
+					return silentExitError{err: err, code: 1}
+				}
+				return nil
+			}
+			if cmd.Flags().Changed("args") || len(envVars) > 0 {
+				return exitError{err: fmt.Errorf("remote install cannot use --args or --env; use --command for stdio installs"), code: 2}
 			}
 			normalizedURL, err := install.NormalizeRemoteURL(args[0])
 			if err != nil {
@@ -138,10 +207,6 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			}
 			if normalizedURL, err = install.ValidateRemoteInstall(normalizedURL, parsedHeaders); err != nil {
 				return err
-			}
-			canonicalClients, err := normalizeClientIDs(clients)
-			if err != nil {
-				return exitError{err: err, code: 2}
 			}
 			result, err := install.InstallRemote(install.Options{
 				URL:     normalizedURL,
@@ -186,7 +251,45 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	cmd.Flags().StringArrayVar(&headers, "header", nil, "additional HTTP header as 'K: V' (repeatable)")
 	cmd.Flags().StringVar(&name, "name", "", "override the inferred server name")
 	cmd.Flags().BoolVar(&forget, "forget", false, "clear the remembered harness preference before installing")
+	cmd.Flags().StringVar(&command, "command", "", "stdio command to run")
+	cmd.Flags().StringVar(&argsCSV, "args", "", "comma-separated stdio command arguments")
+	cmd.Flags().StringArrayVar(&envVars, "env", nil, "stdio environment variable as K=V (repeatable)")
 	return cmd
+}
+
+func parseArgsCSV(value string) ([]string, error) {
+	if value == "" {
+		return nil, nil
+	}
+	reader := csv.NewReader(strings.NewReader(value))
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
+	args, err := reader.Read()
+	if err != nil {
+		return nil, fmt.Errorf("invalid --args CSV: %w", err)
+	}
+	if _, err := reader.Read(); err != io.EOF {
+		return nil, fmt.Errorf("invalid --args CSV: multiple records are not supported")
+	}
+	for _, arg := range args {
+		if arg == "" {
+			return nil, fmt.Errorf("invalid --args CSV: empty arguments are not supported")
+		}
+	}
+	return args, nil
+}
+
+func parseEnvVars(values []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, value := range values {
+		key, val, ok := strings.Cut(value, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("invalid --env; use K=V")
+		}
+		out[key] = val
+	}
+	return out, nil
 }
 
 func resolveToken(cmd *cobra.Command, args []string, tokenStdin bool, tokenEnv string) (string, error) {
@@ -317,13 +420,13 @@ func printInstallSummary(out io.Writer, result install.Result, dryRun bool) erro
 		}
 	} else {
 		for _, written := range result.WrittenInfo {
-			if _, err := fmt.Fprintf(out, "Configured %s → %s (%s)\n", written.ClientName, result.URL, written.Path); err != nil {
+			if _, err := fmt.Fprintf(out, "Configured %s %q → %s (%s)\n", written.ClientName, result.Name, result.URL, written.Path); err != nil {
 				return err
 			}
 		}
 		if len(result.WrittenInfo) == 0 {
 			for _, path := range result.Written {
-				if _, err := fmt.Fprintf(out, "Configured %s (%s)\n", result.URL, path); err != nil {
+				if _, err := fmt.Fprintf(out, "Configured %q → %s (%s)\n", result.Name, result.URL, path); err != nil {
 					return err
 				}
 			}

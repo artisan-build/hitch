@@ -49,6 +49,32 @@ func TestInstallFreshFileExactEntryShapesAndMode(t *testing.T) {
 	}
 }
 
+func TestInstallStdioFreshFileExactEntryShapesAndMode(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range stdioShapeCases(t.TempDir()) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			env := testEnv(home)
+			path := expectedPath(home, tt.id)
+
+			res, err := InstallStdio(stdioOptions(env, tt.id))
+			if err != nil {
+				t.Fatalf("InstallStdio returned error: %v", err)
+			}
+			if len(res.Written) != 1 || res.Written[0] != path {
+				t.Fatalf("written paths = %#v, want %q", res.Written, path)
+			}
+			assertMode0600(t, path)
+			data := readJSON(t, path)
+			got := data[tt.key].(map[string]any)["renamed"].(map[string]any)
+			assertJSONEqual(t, got, tt.expected)
+		})
+	}
+}
+
 func TestExistingConfigsPreserveUnrelatedFormatOtherServersAndAreIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -79,6 +105,38 @@ func TestExistingConfigsPreserveUnrelatedFormatOtherServersAndAreIdempotent(t *t
 			}
 			if strings.Contains(second, "\n  ,") || !strings.Contains(second, "},\n    \"renamed\"") || !strings.Contains(second, "\n  },\n  \"alpha\"") {
 				t.Fatalf("json insertion formatting is not hand-readable:\n%s", second)
+			}
+		})
+	}
+}
+
+func TestInstallStdioExistingConfigsPreserveOtherServersAndAreIdempotent(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range stdioShapeCases(t.TempDir()) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			env := testEnv(home)
+			path := expectedPath(home, tt.id)
+			writeFile(t, path, "{\n  \"zeta\": true,\n  \""+tt.key+"\": {\n    \"other\": {\"command\": \"old\"}\n  },\n  \"alpha\": false\n}\n", 0o600)
+
+			_, err := InstallStdio(stdioOptions(env, tt.id))
+			if err != nil {
+				t.Fatalf("InstallStdio returned error: %v", err)
+			}
+			first := readFile(t, path)
+			_, err = InstallStdio(stdioOptions(env, tt.id))
+			if err != nil {
+				t.Fatalf("second InstallStdio returned error: %v", err)
+			}
+			second := readFile(t, path)
+			if first != second {
+				t.Fatalf("second write was not byte-identical\nfirst:\n%s\nsecond:\n%s", first, second)
+			}
+			if !strings.Contains(second, "\"zeta\": true") || !strings.Contains(second, "\"alpha\": false") || !strings.Contains(second, "\"other\"") {
+				t.Fatalf("json unrelated content not preserved:\n%s", second)
 			}
 		})
 	}
@@ -164,6 +222,124 @@ func TestMalformedConfigsAreRefusedAndUnchanged(t *testing.T) {
 				t.Fatalf("malformed config changed to %q", got)
 			}
 		})
+	}
+}
+
+func TestInstallStdioMalformedConfigsAreRefusedAndUnchanged(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range stdioShapeCases(t.TempDir()) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			path := expectedPath(home, tt.id)
+			bad := "{not valid json"
+			writeFile(t, path, bad, 0o600)
+
+			_, err := InstallStdio(stdioOptions(testEnv(home), tt.id))
+			if err == nil {
+				t.Fatalf("InstallStdio returned nil error")
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Fatalf("error %q does not name %q", err.Error(), path)
+			}
+			if got := readFile(t, path); got != bad {
+				t.Fatalf("malformed config changed to %q", got)
+			}
+		})
+	}
+}
+
+func TestInstallStdioEmptySanitizedNameErrorsAndWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := stdioOptions(testEnv(home), "cursor")
+	opts.Name = "!!!"
+	_, err := InstallStdio(opts)
+	if err == nil || !strings.Contains(err.Error(), "non-empty server name") {
+		t.Fatalf("InstallStdio error = %v, want non-empty server name", err)
+	}
+	if _, statErr := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid stdio name wrote config, stat err = %v", statErr)
+	}
+}
+
+func TestInstallStdioEmptyArgsAreOmittedForEveryClient(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range stdioShapeCases(t.TempDir()) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			opts := stdioOptions(testEnv(home), tt.id)
+			opts.Args = nil
+			_, err := InstallStdio(opts)
+			if err != nil {
+				t.Fatalf("InstallStdio returned error: %v", err)
+			}
+			server := readJSON(t, expectedPath(home, tt.id))[tt.key].(map[string]any)["renamed"].(map[string]any)
+			if tt.id == "opencode" {
+				command := server["command"].([]any)
+				if len(command) != 1 || command[0] != "npx" {
+					t.Fatalf("opencode command = %#v, want command only", command)
+				}
+				return
+			}
+			if _, ok := server["args"]; ok {
+				t.Fatalf("empty args key was written for %s stdio entry: %#v", tt.id, server)
+			}
+			if server["command"] != "npx" || server["env"] == nil {
+				t.Fatalf("stdio entry missing command or env positive controls: %#v", server)
+			}
+		})
+	}
+}
+
+func TestInstallStdioDryRunMasksEnvValuesAndWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	var out strings.Builder
+	opts := stdioOptions(testEnv(home), "cursor")
+	opts.StdioEnv["API_KEY"] = "STDIO_ENV_SENTINEL_SECRET"
+	opts.DryRun = true
+	opts.Stdout = &out
+	_, err := InstallStdio(opts)
+	if err != nil {
+		t.Fatalf("InstallStdio returned error: %v", err)
+	}
+	if strings.Contains(out.String(), "STDIO_ENV_SENTINEL_SECRET") || !strings.Contains(out.String(), "\"API_KEY\": \"***\"") {
+		t.Fatalf("dry-run output leaked or failed to mask env: %q", out.String())
+	}
+	if _, err := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run wrote config, stat err = %v", err)
+	}
+}
+
+func TestInstallStdioAndRemoteReplaceSameServerEntry(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	if _, err := InstallRemote(baseOptions(testEnv(home), "cursor")); err != nil {
+		t.Fatalf("InstallRemote returned error: %v", err)
+	}
+	if _, err := InstallStdio(stdioOptions(testEnv(home), "cursor")); err != nil {
+		t.Fatalf("InstallStdio returned error: %v", err)
+	}
+	server := readJSON(t, path)["mcpServers"].(map[string]any)["renamed"].(map[string]any)
+	if server["url"] != nil || server["command"] != "npx" {
+		t.Fatalf("stdio did not replace remote entry: %#v", server)
+	}
+	if _, err := InstallRemote(baseOptions(testEnv(home), "cursor")); err != nil {
+		t.Fatalf("second InstallRemote returned error: %v", err)
+	}
+	server = readJSON(t, path)["mcpServers"].(map[string]any)["renamed"].(map[string]any)
+	if server["command"] != nil || server["url"] != testURL {
+		t.Fatalf("remote did not replace stdio entry: %#v", server)
 	}
 }
 
@@ -280,6 +456,22 @@ func TestEmptySanitizedNameErrorsAndWritesNothing(t *testing.T) {
 	}
 	if _, statErr := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(statErr) {
 		t.Fatalf("invalid name wrote config, stat err = %v", statErr)
+	}
+}
+
+func TestEmptyInferredNameErrorsAndWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := baseOptions(testEnv(home), "cursor")
+	opts.URL = "https://!!!/mcp"
+	opts.Name = ""
+	_, err := InstallRemote(opts)
+	if err == nil || !strings.Contains(err.Error(), "could not infer a usable server name") {
+		t.Fatalf("error = %v, want unusable inferred name", err)
+	}
+	if _, statErr := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid inferred name wrote config, stat err = %v", statErr)
 	}
 }
 
@@ -579,6 +771,19 @@ func baseOptions(env harness.Env, clientIDs ...string) Options {
 	}
 }
 
+func stdioOptions(env harness.Env, clientIDs ...string) Options {
+	return Options{
+		Name:     "renamed",
+		Command:  "npx",
+		Args:     []string{"-y", "@example/mcp", "arg,with,commas", ""},
+		StdioEnv: map[string]string{"API_KEY": "stdio-secret-value"},
+		Clients:  clientIDs,
+		Yes:      true,
+		NonTTY:   true,
+		Env:      env,
+	}
+}
+
 func snapshotTree(t *testing.T, root string) string {
 	t.Helper()
 	entries := []string{}
@@ -628,6 +833,20 @@ func shapeCases(home string) []shapeCase {
 		{id: "vscode", key: "servers", path: filepath.Join(home, "Library", "Application Support", "Code", "User", "mcp.json"), expected: map[string]any{"type": "http", "url": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
 		{id: "gemini-cli", key: "mcpServers", path: filepath.Join(home, ".gemini", "settings.json"), expected: map[string]any{"httpUrl": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
 		{id: "opencode", key: "mcp", path: filepath.Join(home, ".config", "opencode", "opencode.json"), expected: map[string]any{"type": "remote", "url": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
+	}
+}
+
+func stdioShapeCases(home string) []shapeCase {
+	commandArgsEnv := map[string]any{"command": "npx", "args": []any{"-y", "@example/mcp", "arg,with,commas", ""}, "env": map[string]any{"API_KEY": "stdio-secret-value"}}
+	commandArgsEnvWithType := map[string]any{"type": "stdio", "command": "npx", "args": []any{"-y", "@example/mcp", "arg,with,commas", ""}, "env": map[string]any{"API_KEY": "stdio-secret-value"}}
+	return []shapeCase{
+		{id: "claude-code", key: "mcpServers", path: filepath.Join(home, ".claude.json"), expected: commandArgsEnv},
+		{id: "cursor", key: "mcpServers", path: filepath.Join(home, ".cursor", "mcp.json"), expected: commandArgsEnvWithType},
+		{id: "windsurf", key: "mcpServers", path: filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"), expected: commandArgsEnv},
+		{id: "zed", key: "context_servers", path: filepath.Join(home, ".config", "zed", "settings.json"), expected: commandArgsEnv},
+		{id: "vscode", key: "servers", path: filepath.Join(home, "Library", "Application Support", "Code", "User", "mcp.json"), expected: commandArgsEnvWithType},
+		{id: "gemini-cli", key: "mcpServers", path: filepath.Join(home, ".gemini", "settings.json"), expected: commandArgsEnv},
+		{id: "opencode", key: "mcp", path: filepath.Join(home, ".config", "opencode", "opencode.json"), expected: map[string]any{"type": "local", "command": []any{"npx", "-y", "@example/mcp", "arg,with,commas", ""}, "environment": map[string]any{"API_KEY": "stdio-secret-value"}}},
 	}
 }
 

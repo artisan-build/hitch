@@ -21,11 +21,12 @@ const codexTokenPrefix = "HITCH_TOKEN_"
 var genericNames = map[string]bool{"api": true, "www": true, "app": true, "server": true}
 
 type Adapter struct {
-	ClientID       string
-	ConfigKey      string
-	ConfigFormat   string
-	TokenPersisted bool
-	BuildEntry     func(url string, headers map[string]string, envVar string) map[string]any
+	ClientID         string
+	ConfigKey        string
+	ConfigFormat     string
+	TokenPersisted   bool
+	BuildRemoteEntry func(url string, headers map[string]string, envVar string) map[string]any
+	BuildStdioEntry  func(command string, args []string, env map[string]string) map[string]any
 }
 
 type Target struct {
@@ -37,6 +38,9 @@ type Options struct {
 	URL         string
 	Name        string
 	Headers     map[string]string
+	Command     string
+	Args        []string
+	StdioEnv    map[string]string
 	Clients     []string
 	Yes         bool
 	DryRun      bool
@@ -66,28 +70,53 @@ type WriteInfo struct {
 
 func Adapters() []Adapter {
 	return []Adapter{
-		{ClientID: "claude-code", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildEntry: func(url string, headers map[string]string, _ string) map[string]any {
+		{ClientID: "claude-code", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildRemoteEntry: func(url string, headers map[string]string, _ string) map[string]any {
 			return map[string]any{"type": "http", "url": url, "headers": headers}
-		}},
-		{ClientID: "cursor", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildEntry: func(url string, headers map[string]string, _ string) map[string]any {
+		}, BuildStdioEntry: stdioCommandArgsEnvEntry},
+		{ClientID: "cursor", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildRemoteEntry: func(url string, headers map[string]string, _ string) map[string]any {
 			return map[string]any{"url": url, "headers": headers}
+		}, BuildStdioEntry: func(command string, args []string, env map[string]string) map[string]any {
+			entry := stdioCommandArgsEnvEntry(command, args, env)
+			entry["type"] = "stdio"
+			return entry
 		}},
-		{ClientID: "windsurf", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildEntry: func(url string, headers map[string]string, _ string) map[string]any {
+		{ClientID: "windsurf", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildRemoteEntry: func(url string, headers map[string]string, _ string) map[string]any {
 			return map[string]any{"serverUrl": url, "headers": headers}
-		}},
-		{ClientID: "zed", ConfigKey: "context_servers", ConfigFormat: "json", TokenPersisted: true, BuildEntry: func(url string, headers map[string]string, _ string) map[string]any {
+		}, BuildStdioEntry: stdioCommandArgsEnvEntry},
+		{ClientID: "zed", ConfigKey: "context_servers", ConfigFormat: "json", TokenPersisted: true, BuildRemoteEntry: func(url string, headers map[string]string, _ string) map[string]any {
 			return map[string]any{"url": url, "headers": headers}
-		}},
-		{ClientID: "vscode", ConfigKey: "servers", ConfigFormat: "json", TokenPersisted: true, BuildEntry: func(url string, headers map[string]string, _ string) map[string]any {
+		}, BuildStdioEntry: stdioCommandArgsEnvEntry},
+		{ClientID: "vscode", ConfigKey: "servers", ConfigFormat: "json", TokenPersisted: true, BuildRemoteEntry: func(url string, headers map[string]string, _ string) map[string]any {
 			return map[string]any{"type": "http", "url": url, "headers": headers}
+		}, BuildStdioEntry: func(command string, args []string, env map[string]string) map[string]any {
+			entry := stdioCommandArgsEnvEntry(command, args, env)
+			entry["type"] = "stdio"
+			return entry
 		}},
-		{ClientID: "gemini-cli", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildEntry: func(url string, headers map[string]string, _ string) map[string]any {
+		{ClientID: "gemini-cli", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildRemoteEntry: func(url string, headers map[string]string, _ string) map[string]any {
 			return map[string]any{"httpUrl": url, "headers": headers}
-		}},
-		{ClientID: "opencode", ConfigKey: "mcp", ConfigFormat: "json", TokenPersisted: true, BuildEntry: func(url string, headers map[string]string, _ string) map[string]any {
+		}, BuildStdioEntry: stdioCommandArgsEnvEntry},
+		{ClientID: "opencode", ConfigKey: "mcp", ConfigFormat: "json", TokenPersisted: true, BuildRemoteEntry: func(url string, headers map[string]string, _ string) map[string]any {
 			return map[string]any{"type": "remote", "url": url, "headers": headers}
+		}, BuildStdioEntry: func(command string, args []string, env map[string]string) map[string]any {
+			entry := map[string]any{"type": "local", "command": append([]string{command}, args...)}
+			if len(env) > 0 {
+				entry["environment"] = env
+			}
+			return entry
 		}},
 	}
+}
+
+func stdioCommandArgsEnvEntry(command string, args []string, env map[string]string) map[string]any {
+	entry := map[string]any{"command": command}
+	if len(args) > 0 {
+		entry["args"] = args
+	}
+	if len(env) > 0 {
+		entry["env"] = env
+	}
+	return entry
 }
 
 func AdapterByClientID(id string) (Adapter, bool) {
@@ -208,7 +237,76 @@ func InstallRemote(opts Options) (Result, error) {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: unsupported client", target.Client.Name))
 			continue
 		}
-		entry := adapter.BuildEntry(opts.URL, opts.Headers, res.CodexEnvVar)
+		entry := adapter.BuildRemoteEntry(opts.URL, opts.Headers, res.CodexEnvVar)
+		if opts.DryRun {
+			if err := ValidateEntry(target.Path, adapter, name, entry); err != nil {
+				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+				continue
+			}
+			res.WouldWrite = append(res.WouldWrite, target.Path)
+			if opts.Stdout != nil {
+				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, target.Path, MaskedJSON(entry))
+			}
+			continue
+		}
+		if err := WriteEntry(target.Path, adapter, name, entry); err != nil {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+			continue
+		}
+		res.Written = append(res.Written, target.Path)
+		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: target.Path})
+	}
+	if interactive && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
+		ids := make([]string, 0, len(targets))
+		for _, target := range targets {
+			ids = append(ids, target.Client.ID)
+		}
+		if err := SavePreferences(opts.Env, ids); err != nil {
+			return res, err
+		}
+	}
+	if len(res.Failures) > 0 {
+		return res, fmt.Errorf("some harnesses were not configured: %s", strings.Join(res.Failures, "; "))
+	}
+	return res, nil
+}
+
+func InstallStdio(opts Options) (Result, error) {
+	name := sanitizeName(opts.Name)
+	if name == "" {
+		return Result{}, fmt.Errorf("stdio install requires a non-empty server name")
+	}
+	if strings.TrimSpace(opts.Command) == "" {
+		return Result{}, fmt.Errorf("stdio install requires --command")
+	}
+	if opts.Forget {
+		if err := ForgetPreferences(opts.Env); err != nil {
+			return Result{}, err
+		}
+	}
+	targets, interactive, err := resolveTargets(opts)
+	if err != nil {
+		return Result{}, err
+	}
+	res := Result{Name: name, URL: opts.Command}
+	if len(opts.Clients) == 0 && codexDetected(opts.Env) {
+		res.Manual = append(res.Manual, codexStdioManualInstructions(name, opts.Command, opts.Args, opts.StdioEnv))
+	}
+	if len(targets) == 0 {
+		return res, fmt.Errorf("no detected file-writer harnesses selected")
+	}
+	for _, target := range targets {
+		adapter, ok := AdapterByClientID(target.Client.ID)
+		if !ok {
+			if target.Client.ID == "codex" {
+				res.Manual = append(res.Manual, codexStdioManualInstructions(name, opts.Command, opts.Args, opts.StdioEnv))
+				res.Failures = append(res.Failures, "Codex: hitch cannot configure Codex automatically yet")
+				continue
+			}
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: unsupported client", target.Client.Name))
+			continue
+		}
+		entry := adapter.BuildStdioEntry(opts.Command, opts.Args, opts.StdioEnv)
 		if opts.DryRun {
 			if err := ValidateEntry(target.Path, adapter, name, entry); err != nil {
 				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
@@ -280,6 +378,19 @@ func isLocalhost(host string) bool {
 
 func codexManualInstructions(name string, url string, envVar string) string {
 	return fmt.Sprintf("hitch cannot configure Codex automatically yet. Add this to Codex config manually:\n[mcp_servers.%s]\nurl = %q\nbearer_token_env_var = %q\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN", name, url, envVar, envVar)
+}
+
+func codexStdioManualInstructions(name string, command string, args []string, env map[string]string) string {
+	var b strings.Builder
+	_, _ = fmt.Fprintf(&b, "hitch cannot configure Codex automatically yet. Add this to Codex config manually:\n[mcp_servers.%s]\ncommand = %q\n", name, command)
+	if len(args) > 0 {
+		encoded, _ := json.Marshal(args)
+		_, _ = fmt.Fprintf(&b, "args = %s\n", encoded)
+	}
+	for key := range env {
+		_, _ = fmt.Fprintf(&b, "# Set %s in the Codex server environment.\n", key)
+	}
+	return b.String()
 }
 
 func resolveTargets(opts Options) ([]Target, bool, error) {
@@ -762,7 +873,7 @@ func maskValue(v any) any {
 	case map[string]any:
 		out := map[string]any{}
 		for k, val := range typed {
-			if strings.EqualFold(k, "headers") {
+			if strings.EqualFold(k, "headers") || strings.EqualFold(k, "env") || strings.EqualFold(k, "environment") {
 				out[k] = maskHeaderMap(val)
 			} else {
 				out[k] = maskValue(val)

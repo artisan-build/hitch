@@ -49,29 +49,32 @@ token-store, affordance, or API-base code — none of it belongs here.
 
 ## 2. Command surface
 
+Implemented on main:
+
 ```
 hitch install <url> [token]              # remote HTTP; name inferred from host
-hitch install <name> --url <url>         # explicit name
 hitch install <name> --command <cmd> --args "a,b,c" [--env K=V ...]   # stdio
-hitch uninstall <name>
-hitch scan [<name>]                      # where is this server configured, and what holds a credential
 hitch list                               # which harnesses are installed on this machine
-hitch prompt <url>                       # copy-paste setup text for clients we cannot write
 hitch version
 ```
 
-### Global flags
+Planned commands: `hitch scan`, `hitch uninstall`, and prompt-tier setup flows.
+
+### Current `install` flags
 
 | Flag | Meaning |
 |---|---|
 | `-c, --client <name>` | Target explicit harnesses (repeatable). Skips the interactive picker. |
 | `-y, --yes` | Non-interactive: accept every detected harness. Skips the picker. |
-| `-p, --project` | Write to project-scoped config in the cwd instead of user-global. |
 | `--dry-run` | Print exactly which files would change and how; write nothing. |
 | `--token-stdin` | Read the token from stdin instead of argv. |
 | `--token-env <VAR>` | Read the token from an environment variable. |
 | `--header "K: V"` | Additional header (repeatable). For non-bearer auth schemes. |
 | `--name <name>` | Override the inferred server name. |
+| `--command <cmd>` | Select stdio mode and set the server command. |
+| `--args "a,b,c"` | Comma-separated stdio command arguments. Empty arguments are refused. |
+| `--env K=V` | Stdio environment variable (repeatable). Values are credentials and are never printed. |
+| `--forget` | Clear the remembered harness preference before installing. |
 
 ### Name inference
 
@@ -194,11 +197,20 @@ Gemini CLI path: `~/.gemini/settings.json`; it does not honour XDG for this path
 config-dir override was found. `GEMINI_CONFIG_DIR` appears in its test harness, not in the resolver.
 Source: `google-gemini/gemini-cli` `packages/core/src/config/storage.ts getGlobalSettingsPath()`.
 
+Evidence tiers used in this matrix:
+
+| Tier | Meaning |
+|---|---|
+| SOURCE-VERIFIED | Verified by reading the client's public source schema, resolver, or loader. |
+| ARTIFACT-INSPECTED | Verified by reading a shipped closed-source artifact. This is stronger than vendor docs because it confirms behavior in a real build, but weaker than SOURCE-VERIFIED because the artifact may be minified, pinned to the locally installed version, and have no stable citable URL. |
+| VENDOR-DOCUMENTED | Verified from vendor docs for a client whose source/resolver is not publicly available or was not found. |
+| INHERITED-UNVERIFIED | Neither source, shipped artifact, nor vendor docs were found; the entry is intentionally called out instead of laundered into a verified tier. |
+
 Path evidence tiers:
 
 | Client | Tier | Citation | Limitation |
 |---|---|---|---|
-| Claude Code | SOURCE-VERIFIED | already verified in PR1; `CLAUDE_CONFIG_DIR` handled | Resolver source checked. |
+| Claude Code | ARTIFACT-INSPECTED | Installed `@anthropic-ai/claude-code` bundle version 1.0.51 at `/Users/edgrosvenor/.npm-global/lib/node_modules/@anthropic-ai/claude-code`: `cli.js` builds the config file as `$CLAUDE_CONFIG_DIR/.claude.json` else `~/.claude.json`, and the marker dir as `$CLAUDE_CONFIG_DIR` else `~/.claude`. | Closed-source shipped bundle; minified, pinned to the locally installed version, and no stable citable URL. |
 | Codex | SOURCE-VERIFIED | `openai/codex` `codex-rs/core/src/config/mod.rs` | Resolver source checked; docs omit `CODEX_HOME`. |
 | Zed | SOURCE-VERIFIED | `zed-industries/zed` `crates/paths/src/paths.rs` | Resolver source checked; docs do not state the macOS/XDG distinction. |
 | VS Code | SOURCE-VERIFIED | `microsoft/vscode` `src/vs/platform/environment/node/userDataPath.ts` | Resolver source checked, except `--user-data-dir` is CLI runtime state and not applicable to hitch. |
@@ -244,9 +256,20 @@ which always exists, so detect on `~/.claude` (or `$CLAUDE_CONFIG_DIR`) instead.
 
 ### stdio entry shapes (PR3)
 
-Same clients, different shape — `{command, args, env}` under the same config key, with per-client
-deviations. Verify each against that client's current docs while implementing; do not assume the
-remote shape's key names carry over.
+Same clients, different shape. Do not carry remote URL key names into stdio entries.
+
+| Client | Key | Entry shape | Tier | Citation | Limitation |
+|---|---|---|---|---|---|
+| Claude Code | `mcpServers` | `{command, args, env}` with optional `{type: "stdio"}` | ARTIFACT-INSPECTED | Installed `@anthropic-ai/claude-code` bundle version 1.0.51 at `/Users/edgrosvenor/.npm-global/lib/node_modules/@anthropic-ai/claude-code`: `cli.js` schema has `mcpServers: v.record(v.string(), ...)` with stdio variant `type: v.literal("stdio").optional()`, `command: v.string().min(1)`, `args: v.array(v.string()).default([])`, `env: v.record(v.string()).optional()`. | Closed-source shipped bundle; minified, pinned to the locally installed version, and no stable citable URL. |
+| Codex | `mcp_servers` | TOML manual only: `command`, `args`, `env`/env vars under `[mcp_servers.<name>]` | SOURCE-VERIFIED | `openai/codex` `codex-rs/core/src/config/config_tests.rs`, `codex-rs/core/src/config/mod.rs load_global_mcp_servers()` | hitch still does not write Codex TOML; it prints manual instructions. |
+| Cursor | `mcpServers` | `{type: "stdio", command, args, env}` | VENDOR-DOCUMENTED | `cursor.com/docs/context/mcp`, STDIO server configuration table | Closed source; examples omit `type`, but the field table marks `type` required for stdio. |
+| Windsurf | `mcpServers` | `{command, args, env}` | VENDOR-DOCUMENTED | `docs.devin.ai/desktop/cascade/mcp`, `mcp_config.json` examples | Closed source; docs also mention remote accepts `serverUrl` or `url`, which does not apply to stdio. |
+| Zed | `context_servers` | `{command, args, env}` | SOURCE-VERIFIED | `zed-industries/zed` `crates/settings_content/src/project.rs ContextServerSettingsContent::Stdio` and `ContextServerCommand` | Source allows optional `enabled`, `remote`, and `timeout`; hitch writes only the core server launch fields. |
+| VS Code | `servers` | `{type: "stdio", command, args, env}` | SOURCE-VERIFIED | `microsoft/vscode` `src/vs/platform/mcp/common/mcpPlatformTypes.ts IMcpStdioServerConfiguration` | Source also supports optional `envFile`, `cwd`, sandbox, and dev fields; hitch writes only the core server launch fields. |
+| Gemini CLI | `mcpServers` | `{command, args, env}` | SOURCE-VERIFIED | `google-gemini/gemini-cli` `packages/core/src/config/config.ts MCPServerConfig` | Source also supports optional `cwd`, `timeout`, trust/tool fields, and network transports. |
+| opencode | `mcp` | `{type: "local", command: [cmd, ...args], environment}` | SOURCE-VERIFIED | `sst/opencode` `packages/core/src/v1/config/mcp.ts ConfigMCPV1.Local`; `packages/opencode/src/mcp/index.ts connectLocal()` | opencode does not use separate `args`/`env`; it splits the command array and reads `environment`. |
+
+INHERITED-UNVERIFIED is empty for the PR3 stdio adapter matrix.
 
 ---
 
