@@ -1385,7 +1385,9 @@ func isCodexServerRoot(expr codexExpression) bool {
 // expression before the entry's owned block to the end of the entry's last
 // descendant line, so every byte from the following expression's line onward
 // survives untouched. A contiguous comment block immediately above a table
-// header belongs to that header and is removed with it.
+// header belongs to that header and is removed with it. A descendant of the
+// root anywhere outside the contiguous extent — before or after it — means
+// the entry is scattered; refuse rather than remove it partially.
 func codexRemovalExtent(raw []byte, expressions []codexExpression, rootIdx int, path string) (byteRange, error) {
 	root := expressions[rootIdx]
 	blockStart := rootIdx
@@ -1415,8 +1417,11 @@ func codexRemovalExtent(raw []byte, expressions []codexExpression, rootIdx int, 
 		}
 		end = expr.lineEnd
 	}
-	for i := next; i < len(expressions); i++ {
-		if hasTOMLPathPrefix(expressions[i].path, root.path) {
+	for i, expr := range expressions {
+		if i >= rootIdx && i < next {
+			continue
+		}
+		if hasTOMLPathPrefix(expr.path, root.path) {
 			return byteRange{}, fmt.Errorf("existing Codex config %s scatters mcp_servers entry %q across the file; cannot verify or remove", path, root.path[1])
 		}
 	}
@@ -1456,6 +1461,10 @@ func tomlConsumeBlankLines(raw []byte, pos int) int {
 // exactly when that gap contains no line break.
 func tomlExpressionsAdjacent(raw []byte, prev codexExpression, next codexExpression) bool {
 	if prev.lineEnd > next.anchor {
+		// Defensive bound only: the parser reports same-line trailing comments
+		// as sibling nodes, never as standalone expressions, so today prev's
+		// line cannot end past next's first token. This guards a parser
+		// contract change, not a live input shape.
 		return false
 	}
 	return !bytes.ContainsAny(raw[prev.lineEnd:next.anchor], "\r\n")

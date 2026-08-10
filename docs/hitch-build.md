@@ -240,7 +240,18 @@ those instructions; auto-detected Codex does not fail otherwise-successful JSON 
 For PR7, `hitch scan` and `hitch uninstall` support user-global `~/.codex/config.toml` only. Hitch
 still does not install Codex entries automatically. TOML removal parses with
 `github.com/pelletier/go-toml/v2/unstable`, uses parser-provided byte offsets, and splices exactly
-the matching server root plus its sub-tables without re-serializing the document.
+the matching server root plus its sub-tables without re-serializing the document. Two user-visible
+rules govern the splice:
+
+- **Comment ownership.** A contiguous comment block sitting immediately above the entry's table
+  header belongs to that header and is deleted with the entry — including comment lines the user
+  wrote by hand. A comment separated from the header by a blank line is not owned and survives, as
+  does any comment block above a *following* table.
+- **Scatter refusal.** If any expression belonging to the entry (for example a
+  `[mcp_servers.<name>.env]` sub-table) sits outside the entry's contiguous block — before it or
+  after an unrelated table — the entry is scattered. Hitch refuses with `UNREADABLE — cannot
+  verify`, exits non-zero, and leaves the file byte-identical. It never reports a removal that
+  would leave part of the entry (and possibly a credential) behind.
 
 Test environment pins are only meaningful when the code under test reads the environment per call.
 The `GIT_*` pins are useful because each git invocation receives a fresh environment; `TZ` pins inside

@@ -1187,11 +1187,14 @@ func TestCodexArrayTableCannotCorruptFollowingArrayTable(t *testing.T) {
 }
 
 // TestCodexRemovalFollowingNeighbourSurvivesByteIdentical holds the one
-// property behind every splice defect seen so far: after removing our entry,
-// the content that follows it survives byte-identically — whatever it is. Each
-// row is before = head + gap + entry + neighbour and must produce exactly
-// head + neighbour: the separator gap and the entry (with any comment block it
-// owns) disappear, and not one byte of the neighbour or the head changes.
+// property behind every splice defect seen so far: nothing of ours is left
+// behind and nothing of the neighbour's is disturbed — whatever the neighbour
+// is. Each row is before = head + gap + entry + eaten + neighbour and must
+// produce exactly head + neighbour: the separator gap, the entry (with any
+// comment block it owns), and any explicitly eaten run disappear, while not
+// one byte of the neighbour or the head changes. Rows marked refuse expect
+// the other honest outcome: an unreadable refusal with the file byte-identical
+// — never a "removal" that leaves a descendant of ours behind.
 func TestCodexRemovalFollowingNeighbourSurvivesByteIdentical(t *testing.T) {
 	t.Parallel()
 
@@ -1199,11 +1202,14 @@ func TestCodexRemovalFollowingNeighbourSurvivesByteIdentical(t *testing.T) {
 	const gap = "\n"
 	const entry = "[mcp_servers.zzs]\nurl = \"https://zzs.invalid/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\n"
 	tests := []struct {
-		name      string
-		head      string
-		gap       string
-		entry     string
-		neighbour string
+		name        string
+		head        string
+		gap         string
+		entry       string
+		eaten       string
+		neighbour   string
+		startOfFile bool
+		refuse      bool
 	}{
 		{
 			name:      "comment block",
@@ -1250,6 +1256,35 @@ func TestCodexRemovalFollowingNeighbourSurvivesByteIdentical(t *testing.T) {
 			head:      "title = \"keep\"\n\n# floating comment\n",
 			neighbour: "[tail]\nvalue = 1\n",
 		},
+		{
+			name:      "trailing comment on the header line",
+			entry:     "[mcp_servers.zzs] # instance note\nurl = \"https://zzs.invalid/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\n",
+			neighbour: "[tail]\nvalue = 1\n",
+		},
+		{
+			name:      "trailing whitespace after the header",
+			entry:     "[mcp_servers.zzs] \t\nurl = \"https://zzs.invalid/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\n",
+			neighbour: "[tail]\nvalue = 1\n",
+		},
+		{
+			name:      "crlf document with owned comment block",
+			head:      "title = \"keep\"\r\n",
+			gap:       "\r\n",
+			entry:     "# comment owned by zzs\r\n[mcp_servers.zzs]\r\nurl = \"https://zzs.invalid/mcp\"\r\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\r\n",
+			neighbour: "[[shortcuts]]\r\nname = \"build\"\r\n",
+		},
+		{
+			name:        "entry at start of file eats its following separator",
+			startOfFile: true,
+			eaten:       "\n\n",
+			neighbour:   "[tail]\nvalue = 1\n",
+		},
+		{
+			name:      "descendant preceding the root is refused",
+			entry:     "[mcp_servers.zzs.env]\nAPI_TOKEN = \"ZZLEFTOVERSECRETZZ\"\n\n[mcp_servers.zzs]\nurl = \"https://zzs.invalid/mcp\"\n",
+			neighbour: "[tail]\nvalue = 1\n",
+			refuse:    true,
+		},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -1264,21 +1299,31 @@ func TestCodexRemovalFollowingNeighbourSurvivesByteIdentical(t *testing.T) {
 			if tt.entry == "" {
 				tt.entry = entry
 			}
-			before := tt.head + tt.gap + tt.entry + tt.neighbour
+			if tt.startOfFile {
+				tt.head = ""
+				tt.gap = ""
+			}
+			before := tt.head + tt.gap + tt.entry + tt.eaten + tt.neighbour
 			want := tt.head + tt.neighbour
 			home := t.TempDir()
 			path := filepath.Join(home, ".codex", "config.toml")
 			writeFile(t, path, before, 0o600)
 			res, err := Uninstall(UninstallOptions{Name: "zzs", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(home)})
+			if tt.refuse {
+				if err == nil || len(res.Unreadable) != 1 || len(res.Removed) != 0 {
+					t.Fatalf("Uninstall err = %v result = %#v, want unreadable refusal", err, res)
+				}
+				if got := readFile(t, path); got != before {
+					t.Fatalf("refusal changed bytes\nwant:\n%q\ngot:\n%q", before, got)
+				}
+				return
+			}
 			if err != nil || len(res.Removed) != 1 {
 				t.Fatalf("Uninstall err = %v result = %#v, want removal", err, res)
 			}
 			got := readFile(t, path)
 			if got != want {
 				t.Fatalf("neighbour did not survive byte-identically\nwant:\n%q\ngot:\n%q", want, got)
-			}
-			if !strings.HasSuffix(got, tt.neighbour) {
-				t.Fatalf("neighbour bytes changed\nneighbour:\n%q\ngot:\n%q", tt.neighbour, got)
 			}
 		})
 	}
