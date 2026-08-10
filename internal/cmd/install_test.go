@@ -655,6 +655,61 @@ func TestPickerSelectionDefaultsToAllAndAllowsEmpty(t *testing.T) {
 	}
 }
 
+func TestPickTargetsUsesRunnerSelectionAndIgnoresUnknownIDs(t *testing.T) {
+	targets := []installpkg.Target{
+		{Client: harness.DetectionResult{ID: "cursor", Name: "Cursor"}, Path: "/tmp/cursor.json"},
+		{Client: harness.DetectionResult{ID: "zed", Name: "Zed"}, Path: "/tmp/zed.json"},
+		{Client: harness.DetectionResult{ID: "vscode", Name: "VS Code"}, Path: "/tmp/vscode.json"},
+	}
+	oldRun := runInstallPicker
+	t.Cleanup(func() { runInstallPicker = oldRun })
+
+	for _, tt := range []struct {
+		name        string
+		preferred   map[string]bool
+		runnerIDs   []string
+		wantInitial string
+		wantIDs     string
+	}{
+		{name: "strict subset", preferred: map[string]bool{"cursor": true, "vscode": true}, runnerIDs: []string{"zed"}, wantInitial: "cursor,vscode", wantIDs: "zed"},
+		{name: "empty selection", preferred: nil, runnerIDs: nil, wantInitial: "cursor,zed,vscode", wantIDs: ""},
+		{name: "unknown id ignored", preferred: nil, runnerIDs: []string{"missing", "cursor"}, wantInitial: "cursor,zed,vscode", wantIDs: "cursor"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runInstallPicker = func(url string, options []huh.Option[string], selected *[]string) error {
+				if url != "https://mcp.example.test/mcp" {
+					t.Fatalf("picker url = %q, want normalized url", url)
+				}
+				wantLabels := []string{"Cursor\t/tmp/cursor.json", "Zed\t/tmp/zed.json", "VS Code\t/tmp/vscode.json"}
+				if len(options) != len(wantLabels) {
+					t.Fatalf("options = %#v, want %d", options, len(wantLabels))
+				}
+				for i, wantLabel := range wantLabels {
+					if options[i].Key != wantLabel || options[i].Value != targets[i].Client.ID {
+						t.Fatalf("option %d = %#v, want label %q id %q", i, options[i], wantLabel, targets[i].Client.ID)
+					}
+				}
+				if got := strings.Join(*selected, ","); got != tt.wantInitial {
+					t.Fatalf("initial selection = %q, want %q", got, tt.wantInitial)
+				}
+				*selected = append([]string{}, tt.runnerIDs...)
+				return nil
+			}
+			chosen, err := pickTargets("https://mcp.example.test/mcp", targets, tt.preferred)
+			if err != nil {
+				t.Fatalf("pickTargets returned error: %v", err)
+			}
+			ids := make([]string, 0, len(chosen))
+			for _, target := range chosen {
+				ids = append(ids, target.Client.ID)
+			}
+			if got := strings.Join(ids, ","); got != tt.wantIDs {
+				t.Fatalf("chosen ids = %q, want %q", got, tt.wantIDs)
+			}
+		})
+	}
+}
+
 func TestInstallClientSelectionBypassesPickerAndValidatesNames(t *testing.T) {
 	home := t.TempDir()
 	pickerCalled := false

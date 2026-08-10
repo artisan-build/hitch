@@ -383,11 +383,15 @@ func pickTargets(url string, targets []install.Target, preferred map[string]bool
 		label := fmt.Sprintf("%s\t%s", target.Client.Name, target.Path)
 		options = append(options, huh.NewOption(label, target.Client.ID))
 	}
-	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title(fmt.Sprintf("Install %q into which harnesses?", url)).Options(options...).Value(&selected)))
-	if err := form.Run(); err != nil {
+	if err := runInstallPicker(url, options, &selected); err != nil {
 		return nil, err
 	}
 	return targetsBySelectedIDs(targets, selected), nil
+}
+
+var runInstallPicker = func(url string, options []huh.Option[string], selected *[]string) error {
+	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title(fmt.Sprintf("Install %q into which harnesses?", url)).Options(options...).Value(selected)))
+	return form.Run()
 }
 
 type uninstallPickerOption struct {
