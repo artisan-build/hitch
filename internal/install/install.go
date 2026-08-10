@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/artisan-build/hitch/internal/harness"
 )
 
@@ -50,12 +49,12 @@ type Options struct {
 }
 
 type Result struct {
-	Name         string
-	Written      []string
-	WouldWrite   []string
-	Failures     []string
-	CodexEnvVar  string
-	CodexWritten bool
+	Name        string
+	Written     []string
+	WouldWrite  []string
+	Failures    []string
+	CodexEnvVar string
+	Manual      []string
 }
 
 func Adapters() []Adapter {
@@ -65,9 +64,6 @@ func Adapters() []Adapter {
 		}},
 		{ClientID: "cursor", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildEntry: func(url string, headers map[string]string, _ string) map[string]any {
 			return map[string]any{"url": url, "headers": headers}
-		}},
-		{ClientID: "codex", ConfigKey: "mcp_servers", ConfigFormat: "toml", TokenPersisted: false, BuildEntry: func(url string, _ map[string]string, envVar string) map[string]any {
-			return map[string]any{"url": url, "bearer_token_env_var": envVar}
 		}},
 		{ClientID: "windsurf", ConfigKey: "mcpServers", ConfigFormat: "json", TokenPersisted: true, BuildEntry: func(url string, headers map[string]string, _ string) map[string]any {
 			return map[string]any{"serverUrl": url, "headers": headers}
@@ -158,6 +154,15 @@ func ResolveName(rawURL string, explicit string, yes bool, confirm func(string) 
 }
 
 func InstallRemote(opts Options) (Result, error) {
+	if opts.Name == "" {
+		name, ambiguous, err := InferName(opts.URL)
+		if err != nil {
+			return Result{}, err
+		}
+		if ambiguous && (opts.NonTTY || opts.Yes || len(opts.Clients) > 0) {
+			return Result{}, fmt.Errorf("inferred server name %q is ambiguous; rerun with --name", name)
+		}
+	}
 	name, err := ResolveName(opts.URL, opts.Name, opts.Yes, opts.ConfirmName)
 	if err != nil {
 		return Result{}, err
@@ -171,13 +176,23 @@ func InstallRemote(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if len(targets) == 0 {
-		return Result{Name: name}, fmt.Errorf("no detected file-writer harnesses selected")
-	}
 	res := Result{Name: name, CodexEnvVar: CodexTokenEnvVar(name)}
+	if len(opts.Clients) == 0 {
+		if codexDetected(opts.Env) {
+			res.Manual = append(res.Manual, codexManualInstructions(name, opts.URL, res.CodexEnvVar))
+		}
+	}
+	if len(targets) == 0 {
+		return res, fmt.Errorf("no detected file-writer harnesses selected")
+	}
 	for _, target := range targets {
 		adapter, ok := AdapterByClientID(target.Client.ID)
 		if !ok {
+			if target.Client.ID == "codex" {
+				res.Manual = append(res.Manual, codexManualInstructions(name, opts.URL, res.CodexEnvVar))
+				res.Failures = append(res.Failures, "Codex: hitch cannot configure Codex automatically yet")
+				continue
+			}
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: unsupported client", target.Client.Name))
 			continue
 		}
@@ -194,9 +209,6 @@ func InstallRemote(opts Options) (Result, error) {
 			continue
 		}
 		res.Written = append(res.Written, target.Path)
-		if adapter.ClientID == "codex" {
-			res.CodexWritten = true
-		}
 	}
 	if interactive && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
@@ -213,6 +225,10 @@ func InstallRemote(opts Options) (Result, error) {
 	return res, nil
 }
 
+func codexManualInstructions(name string, url string, envVar string) string {
+	return fmt.Sprintf("hitch cannot configure Codex automatically yet. Add this to Codex config manually:\n[mcp_servers.%s]\nurl = %q\nbearer_token_env_var = %q\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN", name, url, envVar, envVar)
+}
+
 func resolveTargets(opts Options) ([]Target, bool, error) {
 	results, err := harness.Detect(opts.Env)
 	if err != nil {
@@ -226,6 +242,9 @@ func resolveTargets(opts Options) ([]Target, bool, error) {
 		}
 		byID[result.ID] = result
 		if result.Detected {
+			if result.ID == "codex" {
+				continue
+			}
 			detected = append(detected, Target{Client: result, Path: result.ConfigPath})
 		}
 	}
@@ -257,6 +276,19 @@ func resolveTargets(opts Options) ([]Target, bool, error) {
 	return chosen, true, err
 }
 
+func codexDetected(env harness.Env) bool {
+	results, err := harness.Detect(env)
+	if err != nil {
+		return false
+	}
+	for _, result := range results {
+		if result.ID == "codex" && result.Detected {
+			return true
+		}
+	}
+	return false
+}
+
 func CodexTokenEnvVar(name string) string {
 	upper := strings.ToUpper(sanitizeName(name))
 	upper = regexp.MustCompile(`[^A-Z0-9]+`).ReplaceAllString(upper, "_")
@@ -275,9 +307,6 @@ func sanitizeName(name string) string {
 }
 
 func WriteEntry(path string, adapter Adapter, name string, entry map[string]any) error {
-	if adapter.ConfigFormat == "toml" {
-		return writeTOMLEntry(path, adapter.ConfigKey, name, entry)
-	}
 	return writeJSONEntry(path, adapter.ConfigKey, adapter.ClientID == "zed", name, entry)
 }
 
@@ -572,133 +601,6 @@ func replaceRange(raw []byte, start int, end int, replacement []byte) []byte {
 }
 
 func isSpace(c byte) bool { return c == ' ' || c == '\n' || c == '\r' || c == '\t' }
-
-func writeTOMLEntry(path string, key string, name string, entry map[string]any) error {
-	raw, existed, err := readExisting(path)
-	if err != nil {
-		return err
-	}
-	if existed && len(bytes.TrimSpace(raw)) > 0 {
-		decoded := map[string]any{}
-		if _, err := toml.Decode(string(raw), &decoded); err != nil {
-			return fmt.Errorf("existing config %s is not valid TOML (%v); fix or remove it, then retry", path, err)
-		}
-		if hasTopLevelInlineTOMLTable(raw, key) {
-			return fmt.Errorf("existing config %s uses an inline table for mcp_servers; convert it to a [mcp_servers] table, then retry", path)
-		}
-	}
-	block := []byte(fmt.Sprintf("[%s.%s]\nurl = %q\nbearer_token_env_var = %q\n", key, name, entry["url"], entry["bearer_token_env_var"]))
-	updated := setTOMLTable(raw, key, name, block)
-	return writeAtomic(path, updated)
-}
-
-func setTOMLTable(raw []byte, key string, name string, block []byte) []byte {
-	span, ok := findTOMLTableSpan(raw, key, name)
-	if ok {
-		return replaceRange(raw, span.start, span.end, block)
-	}
-	trimmed := bytes.TrimRight(raw, "\n")
-	if len(trimmed) == 0 {
-		return block
-	}
-	out := append([]byte{}, trimmed...)
-	out = append(out, []byte("\n\n")...)
-	out = append(out, block...)
-	return out
-}
-
-func findTOMLTableSpan(raw []byte, key string, name string) (byteRange, bool) {
-	target := key + "." + name
-	start := -1
-	for offset := 0; offset < len(raw); {
-		lineStart := offset
-		lineEnd := offset
-		for lineEnd < len(raw) && raw[lineEnd] != '\n' {
-			lineEnd++
-		}
-		next := lineEnd
-		if next < len(raw) {
-			next++
-		}
-		if header, ok := tomlHeaderName(raw[lineStart:lineEnd]); ok {
-			if start >= 0 {
-				return byteRange{start: start, end: tomlTableContentEnd(raw, start, lineStart)}, true
-			}
-			if header == target {
-				start = lineStart
-			}
-		}
-		offset = next
-	}
-	if start >= 0 {
-		return byteRange{start: start, end: len(raw)}, true
-	}
-	return byteRange{}, false
-}
-
-func tomlTableContentEnd(raw []byte, start int, nextHeaderStart int) int {
-	end := nextHeaderStart
-	for end > start {
-		lineStart := end
-		if lineStart > 0 && raw[lineStart-1] == '\n' {
-			lineStart--
-		}
-		for lineStart > start && raw[lineStart-1] != '\n' {
-			lineStart--
-		}
-		line := bytes.TrimSpace(raw[lineStart:end])
-		if len(line) == 0 || bytes.HasPrefix(line, []byte("#")) {
-			end = lineStart
-			continue
-		}
-		break
-	}
-	return end
-}
-
-func tomlHeaderName(line []byte) (string, bool) {
-	trimmed := bytes.TrimSpace(line)
-	if len(trimmed) < 3 || trimmed[0] != '[' {
-		return "", false
-	}
-	if len(trimmed) >= 4 && trimmed[1] == '[' {
-		end := bytes.Index(trimmed, []byte("]]"))
-		if end < 0 {
-			return "", false
-		}
-		return strings.TrimSpace(string(trimmed[2:end])), true
-	}
-	end := bytes.IndexByte(trimmed, ']')
-	if end < 0 {
-		return "", false
-	}
-	return strings.TrimSpace(string(trimmed[1:end])), true
-}
-
-func hasTopLevelInlineTOMLTable(raw []byte, key string) bool {
-	inTable := false
-	for offset := 0; offset < len(raw); {
-		lineEnd := offset
-		for lineEnd < len(raw) && raw[lineEnd] != '\n' {
-			lineEnd++
-		}
-		line := bytes.TrimSpace(raw[offset:lineEnd])
-		if _, ok := tomlHeaderName(line); ok {
-			inTable = true
-		}
-		if !inTable && bytes.HasPrefix(line, []byte(key)) {
-			rest := bytes.TrimSpace(line[len(key):])
-			if len(rest) > 0 && rest[0] == '=' {
-				return true
-			}
-		}
-		offset = lineEnd
-		if offset < len(raw) {
-			offset++
-		}
-	}
-	return false
-}
 
 func readExisting(path string) ([]byte, bool, error) {
 	raw, err := os.ReadFile(path)

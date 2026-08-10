@@ -6,9 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/BurntSushi/toml"
 	"github.com/artisan-build/hitch/internal/harness"
 )
 
@@ -43,17 +41,6 @@ func TestInstallFreshFileExactEntryShapesAndMode(t *testing.T) {
 				t.Fatalf("written paths = %#v, want %q", res.Written, path)
 			}
 			assertMode0600(t, path)
-			if tt.id == "codex" {
-				data := readTOML(t, path)
-				server := data["mcp_servers"].(map[string]any)["renamed"].(map[string]any)
-				if server["url"] != testURL || server["bearer_token_env_var"] != "HITCH_TOKEN_RENAMED" {
-					t.Fatalf("codex entry = %#v", server)
-				}
-				if strings.Contains(readFile(t, path), testToken) {
-					t.Fatalf("codex persisted token")
-				}
-				return
-			}
 			data := readJSON(t, path)
 			got := data[tt.key].(map[string]any)["renamed"].(map[string]any)
 			assertJSONEqual(t, got, tt.expected)
@@ -71,11 +58,7 @@ func TestExistingConfigsPreserveUnrelatedFormatOtherServersAndAreIdempotent(t *t
 			home := t.TempDir()
 			env := testEnv(home)
 			path := expectedPath(home, tt.id)
-			if tt.id == "codex" {
-				writeFile(t, path, "# keep me\n[profile]\nname = \"default\"\n\n[mcp_servers.other]\nurl = \"https://other/mcp\"\n", 0o600)
-			} else {
-				writeFile(t, path, "{\n  \"zeta\": true,\n  \""+tt.key+"\": {\n    \"other\": {\"url\": \"https://other/mcp\"}\n  },\n  \"alpha\": false\n}\n", 0o600)
-			}
+			writeFile(t, path, "{\n  \"zeta\": true,\n  \""+tt.key+"\": {\n    \"other\": {\"url\": \"https://other/mcp\"}\n  },\n  \"alpha\": false\n}\n", 0o600)
 
 			_, err := InstallRemote(baseOptions(env, tt.id))
 			if err != nil {
@@ -89,12 +72,6 @@ func TestExistingConfigsPreserveUnrelatedFormatOtherServersAndAreIdempotent(t *t
 			second := readFile(t, path)
 			if first != second {
 				t.Fatalf("second write was not byte-identical\nfirst:\n%s\nsecond:\n%s", first, second)
-			}
-			if tt.id == "codex" {
-				if !strings.Contains(second, "[profile]") || !strings.Contains(second, "[mcp_servers.other]") {
-					t.Fatalf("codex unrelated TOML not preserved:\n%s", second)
-				}
-				return
 			}
 			if !strings.Contains(second, "\"zeta\": true") || !strings.Contains(second, "\"alpha\": false") || !strings.Contains(second, "\"other\"") {
 				t.Fatalf("json unrelated content not preserved:\n%s", second)
@@ -162,55 +139,6 @@ func TestJSONUpdateTargetsOnlyTopLevelServerName(t *testing.T) {
 	}
 }
 
-func TestCodexRewriteChangesOnlyOwnTableSpan(t *testing.T) {
-	oldTZ := os.Getenv("TZ")
-	oldLocal := time.Local
-	loc, err := time.LoadLocation("America/Chicago")
-	if err != nil {
-		t.Fatalf("load non-UTC location: %v", err)
-	}
-	t.Setenv("TZ", "America/Chicago")
-	time.Local = loc
-	t.Cleanup(func() {
-		time.Local = oldLocal
-		_ = os.Setenv("TZ", oldTZ)
-	})
-
-	home := t.TempDir()
-	path := expectedPath(home, "codex")
-	before := "# top comment\n" +
-		"[profile]\nname = \"default\"\nlocal_date_time = 1979-05-27T07:32:00\nlocal_time = 07:32:00\nlocal_date = 1979-05-27\noffset_dt = 1979-05-27T07:32:00Z\n\n" +
-		"[mcp_servers.other]\nurl = \"https://other/mcp\"\n\n" +
-		"[mcp_servers.renamed]\nurl = \"old\"\nbearer_token_env_var = \"OLD\"\n\n" +
-		"# project comment\n[[projects]]\npath = \"/x\"\ntrust_level = \"trusted\"\n"
-	span, ok := findTOMLTableSpan([]byte(before), "mcp_servers", "renamed")
-	if !ok {
-		t.Fatalf("fixture does not contain target table")
-	}
-	writeFile(t, path, before, 0o600)
-
-	_, err = InstallRemote(baseOptions(testEnv(home), "codex"))
-	if err != nil {
-		t.Fatalf("InstallRemote returned error: %v", err)
-	}
-	after := readFile(t, path)
-	replacement := "[mcp_servers.renamed]\nurl = \"" + testURL + "\"\nbearer_token_env_var = \"HITCH_TOKEN_RENAMED\"\n"
-	if after[:span.start] != before[:span.start] {
-		t.Fatalf("prefix outside target table changed\nbefore:\n%s\nafter:\n%s", before[:span.start], after[:span.start])
-	}
-	if after[span.start:span.start+len(replacement)] != replacement {
-		t.Fatalf("replacement table = %q, want %q", after[span.start:span.start+len(replacement)], replacement)
-	}
-	if after[span.start+len(replacement):] != before[span.end:] {
-		t.Fatalf("suffix outside target table changed\nbefore:\n%s\nafter:\n%s", before[span.end:], after[span.start+len(replacement):])
-	}
-	for _, want := range []string{"# top comment", "# project comment", "local_date_time = 1979-05-27T07:32:00", "local_time = 07:32:00", "local_date = 1979-05-27", "offset_dt = 1979-05-27T07:32:00Z", "[[projects]]"} {
-		if !strings.Contains(after, want) {
-			t.Fatalf("after is missing %q:\n%s", want, after)
-		}
-	}
-}
-
 func TestMalformedConfigsAreRefusedAndUnchanged(t *testing.T) {
 	t.Parallel()
 
@@ -222,9 +150,6 @@ func TestMalformedConfigsAreRefusedAndUnchanged(t *testing.T) {
 			env := testEnv(home)
 			path := expectedPath(home, tt.id)
 			bad := "{not valid json"
-			if tt.id == "codex" {
-				bad = "[broken\n"
-			}
 			writeFile(t, path, bad, 0o600)
 
 			_, err := InstallRemote(baseOptions(env, tt.id))
@@ -265,22 +190,6 @@ func TestAtomicWriteImplementationUsesExclusiveTempAndRename(t *testing.T) {
 		if !strings.Contains(source, want) {
 			t.Fatalf("writeAtomic source missing %s", want)
 		}
-	}
-}
-
-func TestCodexRefusesInlineMCPServersTable(t *testing.T) {
-	t.Parallel()
-
-	home := t.TempDir()
-	path := expectedPath(home, "codex")
-	raw := "mcp_servers = { other = { url = \"https://other/mcp\" } }\n"
-	writeFile(t, path, raw, 0o600)
-	_, err := InstallRemote(baseOptions(testEnv(home), "codex"))
-	if err == nil || !strings.Contains(err.Error(), "inline table") {
-		t.Fatalf("error = %v, want inline table", err)
-	}
-	if got := readFile(t, path); got != raw {
-		t.Fatalf("inline TOML changed to %q", got)
 	}
 }
 
@@ -355,6 +264,32 @@ func TestEmptySanitizedNameErrorsAndWritesNothing(t *testing.T) {
 	}
 	if _, statErr := os.Stat(expectedPath(home, "cursor")); !os.IsNotExist(statErr) {
 		t.Fatalf("invalid name wrote config, stat err = %v", statErr)
+	}
+}
+
+func TestDeclinedAmbiguousNameErrorsAndWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := baseOptions(testEnv(home))
+	opts.URL = "https://api.example.test/mcp"
+	opts.Name = ""
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.ConfirmName = func(string) (bool, error) { return false, nil }
+	opts.PickTargets = func(targets []Target, preferred map[string]bool) ([]Target, error) {
+		t.Fatalf("PickTargets should not be called after name decline")
+		return nil, nil
+	}
+	_, err := InstallRemote(opts)
+	if err == nil || !strings.Contains(err.Error(), "was not confirmed") {
+		t.Fatalf("error = %v, want declined confirmation", err)
+	}
+	for _, tt := range shapeCases(home) {
+		if _, statErr := os.Stat(tt.path); !os.IsNotExist(statErr) {
+			t.Fatalf("declined name wrote %s, stat err = %v", tt.path, statErr)
+		}
 	}
 }
 
@@ -472,7 +407,6 @@ func shapeCases(home string) []shapeCase {
 	return []shapeCase{
 		{id: "claude-code", key: "mcpServers", path: filepath.Join(home, ".claude.json"), expected: map[string]any{"type": "http", "url": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
 		{id: "cursor", key: "mcpServers", path: filepath.Join(home, ".cursor", "mcp.json"), expected: map[string]any{"url": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
-		{id: "codex", key: "mcp_servers", path: filepath.Join(home, ".codex", "config.toml")},
 		{id: "windsurf", key: "mcpServers", path: filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"), expected: map[string]any{"serverUrl": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
 		{id: "zed", key: "context_servers", path: filepath.Join(home, ".config", "zed", "settings.json"), expected: map[string]any{"url": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
 		{id: "vscode", key: "servers", path: filepath.Join(home, "Library", "Application Support", "Code", "User", "mcp.json"), expected: map[string]any{"type": "http", "url": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
@@ -529,15 +463,6 @@ func readJSON(t *testing.T, path string) map[string]any {
 	var data map[string]any
 	if err := json.Unmarshal([]byte(readFile(t, path)), &data); err != nil {
 		t.Fatalf("json parse %q: %v", path, err)
-	}
-	return data
-}
-
-func readTOML(t *testing.T, path string) map[string]any {
-	t.Helper()
-	data := map[string]any{}
-	if _, err := toml.Decode(readFile(t, path), &data); err != nil {
-		t.Fatalf("toml parse %q: %v", path, err)
 	}
 	return data
 }

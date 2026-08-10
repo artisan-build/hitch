@@ -178,7 +178,10 @@ func parseHeaders(values []string) (map[string]string, error) {
 	headers := map[string]string{}
 	for _, value := range values {
 		key, val, ok := strings.Cut(value, ":")
-		if !ok || strings.TrimSpace(key) == "" {
+		if ok && strings.TrimSpace(key) == "" {
+			return nil, fmt.Errorf("invalid --header; use 'K: V'")
+		}
+		if !ok {
 			candidate := strings.Fields(value)
 			if len(candidate) > 0 && strings.TrimSpace(candidate[0]) != "" {
 				return nil, fmt.Errorf("invalid --header for key %q; use 'K: V'", candidate[0])
@@ -247,15 +250,15 @@ func printInstallSummary(out io.Writer, result install.Result, dryRun bool) erro
 				return err
 			}
 		}
-		return nil
-	}
-	for _, path := range result.Written {
-		if _, err := fmt.Fprintf(out, "Configured %s\n", path); err != nil {
-			return err
+	} else {
+		for _, path := range result.Written {
+			if _, err := fmt.Fprintf(out, "Configured %s\n", path); err != nil {
+				return err
+			}
 		}
 	}
-	if result.CodexWritten {
-		if _, err := fmt.Fprintf(out, "Codex uses an environment variable; export %s before starting Codex.\n", result.CodexEnvVar); err != nil {
+	for _, manual := range result.Manual {
+		if _, err := fmt.Fprintf(out, "%s\n", manual); err != nil {
 			return err
 		}
 	}

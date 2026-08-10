@@ -3,7 +3,6 @@ module github.com/artisan-build/hitch
 go 1.23.0
 
 require (
-	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/huh v0.7.0
 	github.com/spf13/cobra v1.10.1
 	golang.org/x/term v0.30.0

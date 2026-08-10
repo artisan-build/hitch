@@ -90,21 +90,33 @@ func TestInstallCLIHidesTokenOnSuccessAndDryRun(t *testing.T) {
 }
 
 func TestInstallHeaderParseErrorDoesNotEchoSecret(t *testing.T) {
-	home := t.TempDir()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--client", "cursor", "--header", "X-Api-Key SUPERSECRET_NO_COLON"}, &stdout, &stderr, func() (harness.Env, error) {
-		return testEnv(home), nil
-	})
-	if code == 0 {
-		t.Fatalf("exit code = 0, want non-zero")
-	}
-	combined := stdout.String() + stderr.String()
-	if strings.Contains(combined, "SUPERSECRET_NO_COLON") || strings.Contains(combined, "X-Api-Key SUPERSECRET_NO_COLON") {
-		t.Fatalf("header parse error leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "X-Api-Key") {
-		t.Fatalf("header parse error should name only the key; stderr=%q", stderr.String())
+	for _, tt := range []struct {
+		name       string
+		header     string
+		secret     string
+		wantDetail string
+	}{
+		{name: "missing colon", header: "X-Api-Key SUPERSECRET_NO_COLON", secret: "SUPERSECRET_NO_COLON", wantDetail: "X-Api-Key"},
+		{name: "empty key", header: ":SUPERSECRET_EMPTY_KEY", secret: "SUPERSECRET_EMPTY_KEY", wantDetail: "invalid --header; use 'K: V'"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--client", "cursor", "--header", tt.header}, &stdout, &stderr, func() (harness.Env, error) {
+				return testEnv(home), nil
+			})
+			if code == 0 {
+				t.Fatalf("exit code = 0, want non-zero")
+			}
+			combined := stdout.String() + stderr.String()
+			if strings.Contains(combined, tt.secret) || strings.Contains(combined, tt.header) {
+				t.Fatalf("header parse error leaked secret; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tt.wantDetail) {
+				t.Fatalf("header parse error missing detail %q; stderr=%q", tt.wantDetail, stderr.String())
+			}
+		})
 	}
 }
 
@@ -123,10 +135,8 @@ func TestInstallDoesNotPrintCodexEnvLineWhenCodexNotTargeted(t *testing.T) {
 	}
 }
 
-func TestInstallDoesNotPrintCodexEnvLineWhenCodexWriteFails(t *testing.T) {
+func TestInstallExplicitCodexPrintsManualInstructionsAndFails(t *testing.T) {
 	home := t.TempDir()
-	codexConfig := filepath.Join(home, ".codex", "config.toml")
-	writeFile(t, codexConfig, "[broken\n", 0o600)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok_SENTINEL_codex", "--client", "codex"}, &stdout, &stderr, func() (harness.Env, error) {
@@ -138,8 +148,22 @@ func TestInstallDoesNotPrintCodexEnvLineWhenCodexWriteFails(t *testing.T) {
 	if strings.Contains(stdout.String(), "Codex uses an environment variable") {
 		t.Fatalf("stdout printed false Codex note: %q", stdout.String())
 	}
-	if strings.Count(stdout.String()+stderr.String(), string(os.PathSeparator)+"config.toml") != 1 {
-		t.Fatalf("failure detail should be printed once, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("codex config was written, stat err = %v", err)
+	}
+	for _, want := range []string{
+		"hitch cannot configure Codex automatically yet",
+		"[mcp_servers.example]",
+		"bearer_token_env_var = \"HITCH_TOKEN_EXAMPLE\"",
+		"export HITCH_TOKEN_EXAMPLE=YOUR_TOKEN",
+		"Not configured: Codex: hitch cannot configure Codex automatically yet",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q: %q", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "tok_SENTINEL_codex") {
+		t.Fatalf("Codex manual output leaked token; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 
@@ -189,18 +213,62 @@ func TestAmbiguousNameConfirmIsRequired(t *testing.T) {
 	}
 }
 
-func TestInstallPrintsCodexEnvLineOnSuccess(t *testing.T) {
+func TestInstallAutoDetectedCodexIsManualOnly(t *testing.T) {
 	home := t.TempDir()
+	mkdirAll(t, filepath.Join(home, ".cursor"))
+	mkdirAll(t, filepath.Join(home, ".codex"))
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--client", "codex"}, &stdout, &stderr, func() (harness.Env, error) {
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--yes"}, &stdout, &stderr, func() (harness.Env, error) {
 		return testEnv(home), nil
 	})
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Codex uses an environment variable; export HITCH_TOKEN_EXAMPLE") {
-		t.Fatalf("stdout missing Codex note: %q", stdout.String())
+	if _, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); err != nil {
+		t.Fatalf("cursor config was not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("codex config was written, stat err = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Configured "+filepath.Join(home, ".cursor", "mcp.json")) || !strings.Contains(stdout.String(), "hitch cannot configure Codex automatically yet") {
+		t.Fatalf("stdout missing configured cursor or Codex manual note: %q", stdout.String())
+	}
+}
+
+func TestInstallAutoDetectedCodexOnlyPrintsManualInstructions(t *testing.T) {
+	home := t.TempDir()
+	mkdirAll(t, filepath.Join(home, ".codex"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "tok", "--yes"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero")
+	}
+	if !strings.Contains(stdout.String(), "hitch cannot configure Codex automatically yet") || !strings.Contains(stdout.String(), "export HITCH_TOKEN_EXAMPLE=YOUR_TOKEN") {
+		t.Fatalf("stdout missing Codex manual note: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "no detected file-writer harnesses selected") {
+		t.Fatalf("stderr missing no-writers error: %q", stderr.String())
+	}
+}
+
+func TestInstallExplicitClientWithTokenStdinDoesNotPrompt(t *testing.T) {
+	home := t.TempDir()
+	root := NewRootCommand(func() (harness.Env, error) { return testEnv(home), nil })
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetIn(strings.NewReader("stdin-token\n"))
+	root.SetArgs([]string{"install", "https://mcp.example.test/mcp", "--client", "cursor", "--token-stdin"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute returned error: %v; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "Use inferred server name") || strings.Contains(stdout.String()+stderr.String(), "Install ") {
+		t.Fatalf("explicit non-TTY install prompted; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 
