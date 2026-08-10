@@ -1192,24 +1192,27 @@ func TestCodexArrayTableCannotCorruptFollowingArrayTable(t *testing.T) {
 // is. Each row is before = head + gap + entry + eaten + neighbour and must
 // produce exactly head + neighbour: the separator gap, the entry (with any
 // comment block it owns), and any explicitly eaten run disappear, while not
-// one byte of the neighbour or the head changes. Rows marked refuse expect
-// the other honest outcome: an unreadable refusal with the file byte-identical
-// — never a "removal" that leaves a descendant of ours behind.
+// one byte of the neighbour or the head changes. Rows with a refuseReason
+// expect the other honest outcome: an unreadable refusal carrying exactly
+// that reason, with the file byte-identical — never a "removal" that leaves a
+// descendant of ours behind, and never a refusal that only happens to occur
+// for some unrelated cause.
 func TestCodexRemovalFollowingNeighbourSurvivesByteIdentical(t *testing.T) {
 	t.Parallel()
 
 	const head = "title = \"keep\"\n"
 	const gap = "\n"
 	const entry = "[mcp_servers.zzs]\nurl = \"https://zzs.invalid/mcp\"\nbearer_token_env_var = \"HITCH_TOKEN_ZZS\"\n"
+	const scatterReason = "scatters mcp_servers entry \"zzs\" across the file; cannot verify or remove"
 	tests := []struct {
-		name        string
-		head        string
-		gap         string
-		entry       string
-		eaten       string
-		neighbour   string
-		startOfFile bool
-		refuse      bool
+		name         string
+		head         string
+		gap          string
+		entry        string
+		eaten        string
+		neighbour    string
+		startOfFile  bool
+		refuseReason string
 	}{
 		{
 			name:      "comment block",
@@ -1280,10 +1283,16 @@ func TestCodexRemovalFollowingNeighbourSurvivesByteIdentical(t *testing.T) {
 			neighbour:   "[tail]\nvalue = 1\n",
 		},
 		{
-			name:      "descendant preceding the root is refused",
-			entry:     "[mcp_servers.zzs.env]\nAPI_TOKEN = \"ZZLEFTOVERSECRETZZ\"\n\n[mcp_servers.zzs]\nurl = \"https://zzs.invalid/mcp\"\n",
-			neighbour: "[tail]\nvalue = 1\n",
-			refuse:    true,
+			name:         "descendant preceding the root is refused",
+			entry:        "[mcp_servers.zzs.env]\nAPI_TOKEN = \"ZZLEFTOVERSECRETZZ\"\n\n[mcp_servers.zzs]\nurl = \"https://zzs.invalid/mcp\"\n",
+			neighbour:    "[tail]\nvalue = 1\n",
+			refuseReason: scatterReason,
+		},
+		{
+			name:         "descendant after an unrelated table is refused",
+			entry:        "[mcp_servers.zzs]\nurl = \"https://zzs.invalid/mcp\"\n",
+			neighbour:    "[tail]\nvalue = 1\n\n[mcp_servers.zzs.env]\nAPI_TOKEN = \"ZZLEFTOVERSECRETZZ\"\n",
+			refuseReason: scatterReason,
 		},
 	}
 	for _, tt := range tests {
@@ -1309,9 +1318,12 @@ func TestCodexRemovalFollowingNeighbourSurvivesByteIdentical(t *testing.T) {
 			path := filepath.Join(home, ".codex", "config.toml")
 			writeFile(t, path, before, 0o600)
 			res, err := Uninstall(UninstallOptions{Name: "zzs", Clients: []string{"codex"}, Yes: true, NonTTY: true, Env: testEnv(home)})
-			if tt.refuse {
+			if tt.refuseReason != "" {
 				if err == nil || len(res.Unreadable) != 1 || len(res.Removed) != 0 {
 					t.Fatalf("Uninstall err = %v result = %#v, want unreadable refusal", err, res)
+				}
+				if detail := res.Unreadable[0].Detail; !strings.Contains(detail, tt.refuseReason) {
+					t.Fatalf("refusal happened for the wrong reason\nwant reason: %q\ngot detail:  %q", tt.refuseReason, detail)
 				}
 				if got := readFile(t, path); got != before {
 					t.Fatalf("refusal changed bytes\nwant:\n%q\ngot:\n%q", before, got)

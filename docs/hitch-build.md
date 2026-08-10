@@ -245,8 +245,12 @@ rules govern the splice:
 
 - **Comment ownership.** A contiguous comment block sitting immediately above the entry's table
   header belongs to that header and is deleted with the entry — including comment lines the user
-  wrote by hand. A comment separated from the header by a blank line is not owned and survives, as
-  does any comment block above a *following* table.
+  wrote by hand. Ownership is a table-header rule by design: a dotted-key entry
+  (`mcp_servers.<name> = {...}`) does not own the comment above it, so that comment survives as an
+  orphan after removal. A comment separated from the header by a blank line is not owned by the
+  header; when it precedes the entry it survives, but a comment lying inside the entry's contiguous
+  block — between the root and its own sub-tables — is removed with the block. Comment blocks above
+  a *following* table always survive.
 - **Scatter refusal.** If any expression belonging to the entry (for example a
   `[mcp_servers.<name>.env]` sub-table) sits outside the entry's contiguous block — before it or
   after an unrelated table — the entry is scattered. Hitch refuses with `UNREADABLE — cannot
