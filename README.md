@@ -14,6 +14,9 @@ want this server in**, and writes the correct config for each.
 - **Remote HTTP and stdio servers** into the seven JSON-backed clients listed below.
 - **Credentials done properly** — never echoed, never printed, written atomically at `0600`, and a
   config that won't parse is reported rather than clobbered.
+- **Single-use claim codes** — `--claim` exchanges a short-lived code for the token at install time,
+  so the durable credential never lands in your shell history or npm's logs, only in configs that
+  `scan` and `uninstall` can reach.
 - **Revoke what you installed** — `hitch scan` finds every copy of a server across all clients, and
   `hitch uninstall` removes it while leaving the rest of the file byte-for-byte unchanged.
 - **Project-scoped installs** with `-p/--project`, which warn before a credential lands in a file
@@ -73,12 +76,35 @@ version from 0.0.7 onward carries a provenance attestation you can verify with `
 hitch install https://example.com/mcp --token-stdin -c claude-code
 ```
 
-You may pass the token as the optional second positional argument, but that can be visible to `ps`
-and saved in shell history. Prefer `--token-stdin` or `--token-env` for credentials.
+You may pass the token as the optional second positional argument, but passing the token as an
+argument leaves **copies hitch cannot remove** — in your shell history, and (if you used `npx`) in
+`~/.npm/_logs/`. `hitch scan` and `hitch uninstall` find and remove the copies in your harness
+configs; they cannot reach those two. Prefer `--claim`, or `--token-stdin`, or `--token-env`, or the
+masked prompt.
 
 Useful flags: `--name` to override the inferred server name, `--header 'K: V'` for extra HTTP
 headers, `--dry-run` to print the planned writes without touching a file, and `--yes` to accept every
 detected harness without prompting.
+
+### Install with a single-use claim code
+
+If the server operator handed you a one-liner carrying a claim code instead of a token:
+
+```sh
+hitch install https://app.example.com/mcp --claim A1B2-C3D4 --claim-url https://app.example.com/mcp/claim
+```
+
+hitch exchanges the code for the token over HTTPS first, and only then writes any config — a failed
+exchange leaves every file byte-for-byte untouched. What lands in your shell history and npm's logs
+is the **code**, not the token, and a claim code is worthless once its token has been used — so those
+copies go inert almost as soon as they exist, while every copy of the actual credential stays where
+`scan` and `uninstall` can reach it.
+
+The claim response may suggest a server name; `--name` always wins over it. The response can never
+change the URL that gets installed — hitch installs exactly the URL you passed. `--dry-run --claim`
+makes no claim request at all: it previews the writes and leaves the code unspent. `--claim-url` is
+always explicit; hitch never guesses a claim endpoint from the server URL. Server authors implement
+the exchange in a single route — see [docs/claim-contract.md](docs/claim-contract.md).
 
 ## Install a stdio MCP server
 
