@@ -51,12 +51,21 @@ Install from source with Go:
 go install github.com/artisan-build/hitch@v0.0.6
 ```
 
-Coming soon:
+Install with Homebrew:
 
-- Homebrew: the GoReleaser cask is configured for `artisan-build/homebrew-tap`, but publishing is
-  skipped until `HOMEBREW_TAP_GITHUB_TOKEN` is configured.
-- npm: the `hitch-mcp` shim package is configured, but publishing is skipped until `NPM_TOKEN` is
-  configured.
+```sh
+brew install artisan-build/tap/hitch
+```
+
+Or run it without installing anything, via npm:
+
+```sh
+npx hitch-mcp https://example.com/mcp --token-stdin -c claude-code
+```
+
+The npm package is a shim: it downloads the released binary for your platform, verifies it against
+the release checksums, and runs `hitch install` with the arguments you passed. Its version always
+matches the release it fetches.
 
 ## Install a remote MCP server
 
