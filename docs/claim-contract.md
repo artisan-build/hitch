@@ -57,7 +57,9 @@ Errors are `4xx`/`5xx` with a JSON body:
 ```
 
 `error` is a **stable machine-readable enum** — it is what the client branches on. `message` is
-human prose shown to the user verbatim; you control that sentence.
+human prose shown to the user verbatim; you control that sentence. Because it is printed verbatim,
+**never put a token, a claim code, or any other secret in `message`** — the client cannot tell a
+credential from prose, and whatever you write there lands in the user's terminal.
 
 | `error` | suggested HTTP | meaning |
 |---|---|---|
