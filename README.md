@@ -5,7 +5,7 @@ credential carefully — and find and remove every copy of it later.
 
 > **Status: pre-release.** Installable four ways — `curl | sh`, `go install`, Homebrew, and `npx`.
 
-## Current Release: v0.0.7
+## Current Release: v0.1.0
 
 Every MCP client stores server config in a different file, under a different key, with a different
 schema for the same server. `hitch` detects the harnesses you actually have, **asks which ones you
@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/artisan-build/hitch/main/install.sh
 Install from source with Go:
 
 ```sh
-go install github.com/artisan-build/hitch@v0.0.7
+go install github.com/artisan-build/hitch@v0.1.0
 ```
 
 Install with Homebrew:
