@@ -69,9 +69,10 @@ jobs:
           fi
           echo "npm ${version} supports OIDC trusted publishing (>= ${minimum})."
 
-      # Runs unconditionally (after goreleaser, which refuses a dirty checkout) so the
-      # version-binding mechanism is exercised on every release, not first used in anger
-      # when the npm publish gate finally opens. It only edits the runner's checkout.
+      # Runs after goreleaser (which refuses a dirty checkout) and only edits the
+      # runner's checkout. The version it writes is what the unconditional publish
+      # below ships on every tag: this binding is what keeps the npm version equal
+      # to the release tag.
       - name: Set npm shim version from tag
         working-directory: npm/hitch-mcp
         run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
