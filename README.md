@@ -64,7 +64,8 @@ npx hitch-mcp https://example.com/mcp --token-stdin -c claude-code
 
 The npm package is a shim: it downloads the released binary for your platform, verifies it against
 the release checksums, and runs `hitch install` with the arguments you passed. Its version always
-matches the release it fetches.
+matches the release it fetches, and it is published from CI via npm trusted publishing, so every
+version from 0.0.7 onward carries a provenance attestation you can verify with `npm audit signatures`.
 
 ## Install a remote MCP server
 
