@@ -44,7 +44,7 @@ function startServer(routes) {
 
 // Must be an async spawn: a sync spawn would block the event loop, and the
 // test's HTTP server (same process) could never answer the shim's requests.
-function runShim(baseUrl, workDir) {
+function runShim(baseUrl, workDir, timeoutMs = 30000) {
   const tmpBase = path.join(workDir, 'shim-tmp');
   const marker = path.join(workDir, 'marker.txt');
   fs.mkdirSync(tmpBase);
@@ -57,11 +57,17 @@ function runShim(baseUrl, workDir) {
         HITCH_TEST_MARKER: marker,
       },
     });
+    // A hung shim (e.g. an unbounded redirect loop) is killed, surfacing as
+    // status null with empty stderr rather than blocking the test run.
+    const killTimer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     let stderr = '';
     child.stdout.resume();
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', reject);
-    child.on('close', (status) => resolve({ result: { status, stderr }, tmpBase, marker }));
+    child.on('close', (status) => {
+      clearTimeout(killTimer);
+      resolve({ result: { status, stderr }, tmpBase, marker });
+    });
   });
 }
 
@@ -107,6 +113,27 @@ test('exits non-zero on 404 without leaving a half-written file', (t) =>
     assert.match(result.stderr, /HTTP 404/);
     assert.ok(!fs.existsSync(marker), 'binary ran despite failed download');
     assert.deepStrictEqual(fs.readdirSync(tmpBase), [], 'shim left files behind after 404');
+  }));
+
+test('exits non-zero on a redirect loop instead of hanging', (t) =>
+  withCase(t, async (workDir) => {
+    const server = await startServer({
+      [`/dl/${asset}`]: (req, res) => {
+        const { port } = server.address();
+        res.writeHead(302, { location: `http://127.0.0.1:${port}/dl/${asset}` });
+        res.end();
+      },
+    });
+    t.after(() => server.close());
+    const base = `http://127.0.0.1:${server.address().port}/dl`;
+    // Short timeout: if the redirect cap regresses, the shim hangs and the
+    // kill timer turns that into status null + empty stderr, failing both
+    // asserts below instead of blocking CI.
+    const { result, tmpBase, marker } = await runShim(base, workDir, 10000);
+    assert.ok(result.status !== null && result.status !== 0, `expected a clean non-zero exit, got status ${result.status}`);
+    assert.match(result.stderr, /hitch-mcp: /, 'shim did not fail with a clear message');
+    assert.ok(!fs.existsSync(marker), 'binary ran despite redirect loop');
+    assert.deepStrictEqual(fs.readdirSync(tmpBase), [], 'shim left files behind after redirect loop');
   }));
 
 test('exits non-zero on checksum mismatch with nothing extracted', (t) =>

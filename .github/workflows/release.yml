@@ -48,6 +48,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
+      # Ungated: the version step below runs on every release and must not depend on
+      # whatever Node the runner image happens to preinstall.
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
       # Runs unconditionally (after goreleaser, which refuses a dirty checkout) so the
       # version-binding mechanism is exercised on every release, not first used in anger
       # when the npm publish gate finally opens. It only edits the runner's checkout.

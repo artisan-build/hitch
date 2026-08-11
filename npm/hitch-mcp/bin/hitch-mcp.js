@@ -27,14 +27,19 @@ function platformParts() {
   return { osPart, archPart };
 }
 
-function download(url, dest) {
+function download(url, dest, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest, { mode: 0o600 });
     const client = new URL(url).protocol === 'http:' ? http : https;
     client.get(url, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
-        file.close(() => download(response.headers.location, dest).then(resolve, reject));
+        if (redirectsLeft <= 0) {
+          file.close(() => fs.rmSync(dest, { force: true }));
+          reject(new Error(`too many redirects: ${url}`));
+          return;
+        }
+        file.close(() => download(response.headers.location, dest, redirectsLeft - 1).then(resolve, reject));
         return;
       }
       if (response.statusCode !== 200) {
