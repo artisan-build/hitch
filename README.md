@@ -3,8 +3,7 @@
 Install an MCP server into coding agents on your machine with one command, while handling the
 credential carefully — and find and remove every copy of it later.
 
-> **Status: pre-release.** v0.0.7 ships `curl | sh` and `go install`; Homebrew and npm publishing are
-> wired but waiting on publisher tokens.
+> **Status: pre-release.** Installable four ways — `curl | sh`, `go install`, Homebrew, and `npx`.
 
 ## Current Release: v0.0.7
 
