@@ -4,15 +4,17 @@ on:
   push:
     tags: ['v*']
 
+# contents: write is for GoReleaser (creates the GitHub Release and uploads assets).
+# id-token: write lets npm authenticate via OIDC trusted publishing; the npm-side
+# trusted publisher config lives on npmjs.com (GitHub Actions, artisan-build/hitch,
+# workflow release.yml).
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    env:
-      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
-      NPM_PUBLISH_ENABLED: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -25,20 +27,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Homebrew is the only guarded publisher: HOMEBREW_TAP_GITHUB_TOKEN is a GitHub
+      # PAT for pushing the cask to the tap repo, unrelated to npm's OIDC auth.
       - name: Explain guarded publishers
         run: |
           if [ -z "${HOMEBREW_TAP_GITHUB_TOKEN}" ]; then
             echo "Homebrew tap publish skipped: HOMEBREW_TAP_GITHUB_TOKEN is not configured."
           fi
-          if [ -z "${NPM_TOKEN}" ]; then
-            echo "npm publish skipped: NPM_TOKEN is not configured."
-          elif [ "${NPM_PUBLISH_ENABLED}" != "true" ]; then
-            echo "npm publish skipped: NPM_PUBLISH_ENABLED repository variable is not set to true."
-          fi
         env:
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_PUBLISH_ENABLED: ${{ env.NPM_PUBLISH_ENABLED }}
 
       - name: Release GitHub assets
         uses: goreleaser/goreleaser-action@v6
@@ -48,36 +45,42 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
-      # Ungated: the version step below runs on every release and must not depend on
-      # whatever Node the runner image happens to preinstall.
+      # One Node setup serves the version step and the publish. Deliberately no
+      # registry-url input: npm's default registry is already registry.npmjs.org,
+      # and setting it would make setup-node write an .npmrc wired to a token env
+      # var — auth machinery that OIDC trusted publishing replaces entirely.
       - name: Setup Node
         uses: actions/setup-node@v5
         with:
           node-version: 24
 
-      # Runs unconditionally (after goreleaser, which refuses a dirty checkout) so the
-      # version-binding mechanism is exercised on every release, not first used in anger
-      # when the npm publish gate finally opens. It only edits the runner's checkout.
+      # OIDC trusted publishing requires npm >= 11.5.1; Node's bundled npm may lag.
+      # Upgrade and assert, so a too-old npm fails here as "npm too old" instead of
+      # surfacing later as a confusing auth error. The comparison must be sort -V,
+      # not a string compare: lexicographically "11.10.0" sorts before "11.5.1".
+      - name: Ensure npm supports OIDC trusted publishing
+        run: |
+          npm install -g npm@latest
+          version="$(npm --version)"
+          minimum="11.5.1"
+          if [ "$(printf '%s\n' "$minimum" "$version" | sort -V | head -n1)" != "$minimum" ]; then
+            echo "npm ${version} is too old for OIDC trusted publishing (need >= ${minimum})." >&2
+            exit 1
+          fi
+          echo "npm ${version} supports OIDC trusted publishing (>= ${minimum})."
+
+      # Runs after goreleaser (which refuses a dirty checkout) and only edits the
+      # runner's checkout. The version it writes is what the unconditional publish
+      # below ships on every tag: this binding is what keeps the npm version equal
+      # to the release tag.
       - name: Set npm shim version from tag
         working-directory: npm/hitch-mcp
         run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
 
-      # npm/hitch-mcp now has an automated test (npm test, run by the npm-shim job in ci.yml).
-      # To enable publishing, the maintainer sets the NPM_TOKEN secret and the
-      # NPM_PUBLISH_ENABLED repository variable to 'true'.
-      - name: Setup Node for npm publish
-        if: ${{ env.HAS_NPM_TOKEN == 'true' && env.NPM_PUBLISH_ENABLED == 'true' }}
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-
-      # npm/hitch-mcp now has an automated test (npm test, run by the npm-shim job in ci.yml).
-      # Publishing stays gated until the maintainer sets NPM_TOKEN and NPM_PUBLISH_ENABLED.
-      # The version published is the one written from the tag by the step above.
+      # Publishing is unconditional: every tag publishes the shim, and if the OIDC
+      # exchange breaks the release fails loudly right here. Authentication is npm
+      # trusted publishing — no token secret anywhere. The version published is the
+      # one written from the tag by the step above.
       - name: Publish npm shim
-        if: ${{ env.HAS_NPM_TOKEN == 'true' && env.NPM_PUBLISH_ENABLED == 'true' }}
         working-directory: npm/hitch-mcp
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
