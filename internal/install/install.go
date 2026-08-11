@@ -21,6 +21,12 @@ import (
 
 const codexTokenPrefix = "HITCH_TOKEN_"
 
+// ClaimPendingAuthorization stands in for the Authorization header during
+// --dry-run --claim, where no exchange happens and no token exists. It must
+// never read like a value, and masking leaves it visible so the preview says
+// what would really be written.
+const ClaimPendingAuthorization = "Bearer <token from claim, not yet requested>"
+
 var genericNames = map[string]bool{"api": true, "www": true, "app": true, "server": true}
 
 type Adapter struct {
@@ -985,6 +991,12 @@ func CodexTokenEnvVar(name string) string {
 		upper = "MCP"
 	}
 	return codexTokenPrefix + upper
+}
+
+// SanitizeName applies the same sanitizer used for explicit --name values; the
+// claim flow runs a server-suggested name through it before use.
+func SanitizeName(name string) string {
+	return sanitizeName(name)
 }
 
 func sanitizeName(name string) string {
@@ -2061,19 +2073,30 @@ func maskHeaderMap(v any) any {
 	switch typed := v.(type) {
 	case map[string]string:
 		out := map[string]any{}
-		for k := range typed {
-			out[k] = "***"
+		for k, value := range typed {
+			out[k] = maskHeaderValue(value)
 		}
 		return out
 	case map[string]any:
 		out := map[string]any{}
-		for k := range typed {
+		for k, value := range typed {
+			if s, ok := value.(string); ok {
+				out[k] = maskHeaderValue(s)
+				continue
+			}
 			out[k] = "***"
 		}
 		return out
 	default:
 		return v
 	}
+}
+
+func maskHeaderValue(value string) string {
+	if value == ClaimPendingAuthorization {
+		return value
+	}
+	return "***"
 }
 
 func LoadPreferences(env harness.Env) (map[string]bool, error) {

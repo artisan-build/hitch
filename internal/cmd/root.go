@@ -8,7 +8,9 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"time"
 
+	"github.com/artisan-build/hitch/internal/claim"
 	"github.com/artisan-build/hitch/internal/harness"
 	"github.com/artisan-build/hitch/internal/install"
 	"github.com/charmbracelet/huh"
@@ -111,6 +113,8 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	var command string
 	var argsCSV string
 	var envVars []string
+	var claimCode string
+	var claimURL string
 
 	cmd := &cobra.Command{
 		Use:   "install <url|name> [token]",
@@ -149,6 +153,9 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				}
 				if len(headers) > 0 || tokenStdin || tokenEnv != "" {
 					return exitError{err: fmt.Errorf("stdio install cannot use --header, --token-stdin, or --token-env"), code: 2}
+				}
+				if claimCode != "" || claimURL != "" {
+					return exitError{err: fmt.Errorf("stdio install cannot use --claim or --claim-url"), code: 2}
 				}
 				parsedArgs, err := parseArgsCSV(argsCSV)
 				if err != nil {
@@ -195,11 +202,13 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			if cmd.Flags().Changed("args") || len(envVars) > 0 {
 				return exitError{err: fmt.Errorf("remote install cannot use --args or --env; use --command for stdio installs"), code: 2}
 			}
-			normalizedURL, err := install.NormalizeRemoteURL(args[0])
-			if err != nil {
-				return err
+			claimMode := claimCode != "" || claimURL != ""
+			if claimMode {
+				if err := validateClaimFlagUse(claimCode, claimURL, args, tokenStdin, tokenEnv); err != nil {
+					return err
+				}
 			}
-			resolvedToken, err := resolveToken(cmd, args, tokenStdin, tokenEnv)
+			normalizedURL, err := install.NormalizeRemoteURL(args[0])
 			if err != nil {
 				return err
 			}
@@ -207,14 +216,62 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			if err != nil {
 				return exitError{err: err, code: 2}
 			}
+			var resolvedToken string
+			if claimMode {
+				if _, ok := parsedHeaders["Authorization"]; ok {
+					return exitError{err: fmt.Errorf("authorization header cannot be combined with --claim; the claim exchange supplies the bearer token"), code: 2}
+				}
+			} else {
+				if resolvedToken, err = resolveToken(cmd, args, tokenStdin, tokenEnv); err != nil {
+					return err
+				}
+			}
 			if resolvedToken != "" {
 				if _, ok := parsedHeaders["Authorization"]; ok {
 					return exitError{err: fmt.Errorf("authorization header cannot be combined with bearer token input"), code: 2}
 				}
 				parsedHeaders["Authorization"] = "Bearer " + resolvedToken
 			}
+			var validatedClaimURL string
+			if claimMode {
+				if validatedClaimURL, err = claim.ValidateURL(claimURL); err != nil {
+					return err
+				}
+				// The placeholder marks the credential intent so the insecure-http
+				// install-URL gate fires before the exchange, exactly as it would
+				// for a supplied token.
+				parsedHeaders["Authorization"] = install.ClaimPendingAuthorization
+			}
 			if normalizedURL, err = install.ValidateRemoteInstall(normalizedURL, parsedHeaders); err != nil {
 				return err
+			}
+			if claimMode {
+				if dryRun {
+					if _, err := fmt.Fprintln(cmd.OutOrStdout(), "Dry run: no request was made to the claim URL; the claim code was not spent and is still valid."); err != nil {
+						return err
+					}
+					if name == "" {
+						if _, err := fmt.Fprintln(cmd.OutOrStdout(), "Dry run: the final server name is not known yet; it will come from --name, the claim response, or URL inference."); err != nil {
+							return err
+						}
+						name = "claim-name-pending"
+					}
+				} else {
+					version, _, _ := buildVersionInfo()
+					resp, exchangeErr := claim.Exchange(validatedClaimURL, claimCode, version)
+					if exchangeErr != nil {
+						return claimFailure(exchangeErr, normalizedURL, name)
+					}
+					parsedHeaders["Authorization"] = "Bearer " + resp.Token
+					if name == "" {
+						if suggested := install.SanitizeName(resp.Name); suggested != "" {
+							name = suggested
+						}
+					}
+					if err := printClaimExpiry(cmd.OutOrStdout(), resp.ExpiresAt); err != nil {
+						return err
+					}
+				}
 			}
 			result, err := install.InstallRemote(install.Options{
 				URL:     normalizedURL,
@@ -267,7 +324,60 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	cmd.Flags().StringVar(&command, "command", "", "stdio command to run")
 	cmd.Flags().StringVar(&argsCSV, "args", "", "comma-separated stdio command arguments")
 	cmd.Flags().StringArrayVar(&envVars, "env", nil, "stdio environment variable as K=V (repeatable)")
+	cmd.Flags().StringVar(&claimCode, "claim", "", "single-use claim code to exchange for a bearer token before installing")
+	cmd.Flags().StringVar(&claimURL, "claim-url", "", "claim endpoint that redeems --claim (https required)")
 	return cmd
+}
+
+func validateClaimFlagUse(claimCode string, claimURL string, args []string, tokenStdin bool, tokenEnv string) error {
+	if claimCode == "" {
+		return exitError{err: fmt.Errorf("--claim-url requires --claim"), code: 2}
+	}
+	if claimURL == "" {
+		return exitError{err: fmt.Errorf("--claim requires --claim-url; hitch never derives a claim endpoint from the server URL"), code: 2}
+	}
+	if len(args) == 2 {
+		return exitError{err: fmt.Errorf("--claim cannot be combined with a positional token; the claim exchange supplies the token"), code: 2}
+	}
+	if tokenStdin {
+		return exitError{err: fmt.Errorf("--claim cannot be combined with --token-stdin; the claim exchange supplies the token"), code: 2}
+	}
+	if tokenEnv != "" {
+		return exitError{err: fmt.Errorf("--claim cannot be combined with --token-env; the claim exchange supplies the token"), code: 2}
+	}
+	return nil
+}
+
+// claimFailure maps exchange errors onto hitch's exit taxonomy: a malformed
+// code is the user's typo (exit 2), everything else is operational (exit 1).
+// The not-a-claim-endpoint path additionally offers the history-safe install
+// alternative, since a token handed over out-of-band still works.
+func claimFailure(err error, serverURL string, name string) error {
+	var enumErr *claim.EnumError
+	if errors.As(err, &enumErr) && enumErr.Misuse() {
+		return exitError{err: enumErr, code: 2}
+	}
+	var notClaim *claim.NotClaimEndpointError
+	if errors.As(err, &notClaim) {
+		alternative := fmt.Sprintf("hitch install %s --token-stdin", serverURL)
+		if name != "" {
+			alternative += " --name " + name
+		}
+		return fmt.Errorf("%s\n\nAsk the server operator for a token, then install it without putting it in your shell history:\n  %s", notClaim.Error(), alternative)
+	}
+	return err
+}
+
+func printClaimExpiry(out io.Writer, expiresAt time.Time) error {
+	if expiresAt.IsZero() {
+		return nil
+	}
+	if expiresAt.Before(time.Now()) {
+		_, err := fmt.Fprintf(out, "WARNING: the server reports this token already expired at %s; installing anyway — ask the operator for a fresh setup line.\n", expiresAt.Format(time.RFC3339))
+		return err
+	}
+	_, err := fmt.Fprintf(out, "Token expires at %s.\n", expiresAt.Format(time.RFC3339))
+	return err
 }
 
 func parseArgsCSV(value string) ([]string, error) {
