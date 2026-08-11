@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const tar = require('tar');
@@ -10,6 +11,7 @@ const tar = require('tar');
 const pkg = require('../package.json');
 const repo = process.env.HITCH_REPO || 'artisan-build/hitch';
 const version = process.env.HITCH_VERSION || `v${pkg.version}`;
+const baseUrl = process.env.HITCH_BASE_URL || `https://github.com/${repo}/releases/download/${version}`;
 
 function fail(message) {
   console.error(`hitch-mcp: ${message}`);
@@ -28,7 +30,8 @@ function platformParts() {
 function download(url, dest) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest, { mode: 0o600 });
-    https.get(url, (response) => {
+    const client = new URL(url).protocol === 'http:' ? http : https;
+    client.get(url, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
         file.close(() => download(response.headers.location, dest).then(resolve, reject));
@@ -49,27 +52,28 @@ function download(url, dest) {
 async function main() {
   const { osPart, archPart } = platformParts();
   const asset = `hitch_${osPart}_${archPart}.tar.gz`;
-  const base = `https://github.com/${repo}/releases/download/${version}`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hitch-mcp-'));
   const archive = path.join(tmp, asset);
   const checksums = path.join(tmp, 'checksums.txt');
   try {
-    await download(`${base}/${asset}`, archive);
-    await download(`${base}/checksums.txt`, checksums);
+    await download(`${baseUrl}/${asset}`, archive);
+    await download(`${baseUrl}/checksums.txt`, checksums);
     const expectedLine = fs.readFileSync(checksums, 'utf8').split('\n').find((line) => line.trim().endsWith(`  ${asset}`));
     if (!expectedLine) {
-      fail(`checksums.txt does not contain ${asset}`);
+      // Throw instead of fail(): process.exit would skip the finally cleanup below.
+      throw new Error(`checksums.txt does not contain ${asset}`);
     }
     const expected = expectedLine.trim().split(/\s+/)[0];
     const actual = crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
     if (actual !== expected) {
-      fail(`checksum mismatch for ${asset}`);
+      throw new Error(`checksum mismatch for ${asset}`);
     }
     await tar.x({ file: archive, cwd: tmp });
     const hitch = path.join(tmp, 'hitch');
     fs.chmodSync(hitch, 0o755);
     const result = spawnSync(hitch, ['install', ...process.argv.slice(2)], { stdio: 'inherit' });
-    process.exit(result.status == null ? 1 : result.status);
+    // Set exitCode instead of calling process.exit, which would skip the finally cleanup.
+    process.exitCode = result.status == null ? 1 : result.status;
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

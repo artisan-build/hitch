@@ -48,8 +48,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
-      # Do not enable npm publishing until npm/hitch-mcp/bin/hitch-mcp.js has an automated test.
-      # Its redirect-handling bug shipped undetected because nothing ever ran the downloader.
+      # Runs unconditionally (after goreleaser, which refuses a dirty checkout) so the
+      # version-binding mechanism is exercised on every release, not first used in anger
+      # when the npm publish gate finally opens. It only edits the runner's checkout.
+      - name: Set npm shim version from tag
+        working-directory: npm/hitch-mcp
+        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+
+      # npm/hitch-mcp now has an automated test (npm test, run by the npm-shim job in ci.yml).
+      # To enable publishing, the maintainer sets the NPM_TOKEN secret and the
+      # NPM_PUBLISH_ENABLED repository variable to 'true'.
       - name: Setup Node for npm publish
         if: ${{ env.HAS_NPM_TOKEN == 'true' && env.NPM_PUBLISH_ENABLED == 'true' }}
         uses: actions/setup-node@v5
@@ -57,8 +65,9 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      # Do not enable npm publishing until npm/hitch-mcp/bin/hitch-mcp.js has an automated test.
-      # Its redirect-handling bug shipped undetected because nothing ever ran the downloader.
+      # npm/hitch-mcp now has an automated test (npm test, run by the npm-shim job in ci.yml).
+      # Publishing stays gated until the maintainer sets NPM_TOKEN and NPM_PUBLISH_ENABLED.
+      # The version published is the one written from the tag by the step above.
       - name: Publish npm shim
         if: ${{ env.HAS_NPM_TOKEN == 'true' && env.NPM_PUBLISH_ENABLED == 'true' }}
         working-directory: npm/hitch-mcp
