@@ -90,8 +90,16 @@ func ValidateLookupName(name string) (string, error) {
 }
 
 type Options struct {
-	URL                 string
-	Name                string
+	URL  string
+	Name string
+	// NameFromServer marks Name as the claim response's suggestion rather than
+	// the user's choice. A server-chosen name may not overwrite an existing
+	// entry: the user overwrites entries, servers do not.
+	NameFromServer bool
+	// NamePending marks a claim dry run where the final name is unknowable
+	// (no --name, and the exchange that could supply one was skipped). Name
+	// then holds an internal validation key that must never surface in output.
+	NamePending         bool
 	Headers             map[string]string
 	Command             string
 	Args                []string
@@ -551,9 +559,15 @@ func InstallRemote(opts Options) (Result, error) {
 		return Result{}, err
 	}
 	res := Result{Name: name, URL: opts.URL, CodexEnvVar: CodexTokenEnvVar(name)}
+	codexManual := func() string {
+		if opts.NamePending {
+			return "Codex: manual instructions omitted from this dry run; the server name is not yet known (pass --name, or it will come from the claim response or URL inference)."
+		}
+		return codexManualInstructions(name, opts.URL, res.CodexEnvVar)
+	}
 	if len(opts.Clients) == 0 {
 		if codexDetected(opts.Env) {
-			res.Manual = append(res.Manual, codexManualInstructions(name, opts.URL, res.CodexEnvVar))
+			res.Manual = append(res.Manual, codexManual())
 		}
 	}
 	if len(targets) == 0 {
@@ -563,7 +577,7 @@ func InstallRemote(opts Options) (Result, error) {
 		adapter, ok := AdapterByClientID(target.Client.ID)
 		if !ok {
 			if target.Client.ID == "codex" {
-				res.Manual = append(res.Manual, codexManualInstructions(name, opts.URL, res.CodexEnvVar))
+				res.Manual = append(res.Manual, codexManual())
 				res.Failures = append(res.Failures, "Codex: hitch cannot configure Codex automatically yet")
 				continue
 			}
@@ -578,6 +592,10 @@ func InstallRemote(opts Options) (Result, error) {
 		}
 		if err := guardProjectCredentialWrite(opts, writePath, entry); err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
+			continue
+		}
+		if opts.NameFromServer && entryExists(writePath, adapter, name) {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: the claim response suggested the name %q, which already exists in %s; rerun with --name to choose the name yourself", target.Client.Name, name, writePath))
 			continue
 		}
 		if opts.DryRun {
@@ -757,6 +775,46 @@ func tomlKeySegment(key string) string {
 		return key
 	}
 	return strconv.Quote(key)
+}
+
+// PreflightTargets evaluates every target-selection precondition that does not
+// depend on a token or on the user's interactive picks: env and detection
+// errors, unknown or project-less clients, the non-TTY flag rule, and the
+// no-detected-harnesses case. Claim installs run it before the exchange, so a
+// run that is going to be refused never spends a claim code. It reuses
+// resolveTargets itself — with a picker stub that selects everything — so the
+// preflight cannot drift from the real selection logic.
+func PreflightTargets(opts Options) error {
+	probe := opts
+	probe.PickTargets = func(targets []Target, _ map[string]bool) ([]Target, error) {
+		return targets, nil
+	}
+	targets, _, err := resolveTargets(probe)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no detected file-writer harnesses selected")
+	}
+	return nil
+}
+
+// ValidateTokenValue rejects a bearer token that is blank or carries control
+// characters — a CR/LF inside a token is a header-injection shape once the
+// value is written into a config, not merely untidy. Every token source
+// (positional, stdin, env, TTY prompt, claim exchange) applies this one
+// function, so the sources cannot drift apart. The message is a predicate
+// fragment; callers prefix the source.
+func ValidateTokenValue(token string) error {
+	if strings.TrimSpace(token) == "" {
+		return errors.New("is empty")
+	}
+	for _, r := range token {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("contains control characters")
+		}
+	}
+	return nil
 }
 
 func resolveTargets(opts Options) ([]Target, bool, error) {
@@ -1004,6 +1062,26 @@ func sanitizeName(name string) string {
 	name = regexp.MustCompile(`[^a-z0-9_.-]+`).ReplaceAllString(name, "-")
 	name = strings.Trim(name, "-_.")
 	return name
+}
+
+// entryExists reports whether the config at path already holds an entry under
+// this name. Unreadable or unparseable configs report false — the write path
+// refuses those on its own, with a more specific error.
+func entryExists(path string, adapter Adapter, name string) bool {
+	raw, existed, err := readExisting(path)
+	if err != nil || !existed || len(bytes.TrimSpace(raw)) == 0 {
+		return false
+	}
+	var decoded map[string]any
+	if json.Unmarshal(raw, &decoded) != nil {
+		return false
+	}
+	servers, ok := decoded[adapter.ConfigKey].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = servers[name]
+	return ok
 }
 
 func WriteEntry(path string, adapter Adapter, name string, entry map[string]any) error {

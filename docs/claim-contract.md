@@ -45,6 +45,10 @@ User-Agent: hitch/<version>
 
 The client ignores unknown fields, so the response can grow without a version bump.
 
+`name` is advisory in every direction: the user's `--name` beats it, and a suggested name that
+matches an entry the user already has is **refused, not overwritten** — the client tells the user to
+pick a name with `--name`. Keep suggested names short; clients may refuse absurdly long ones.
+
 **There is no `server_url` field, deliberately.** hitch installs the URL the user passed; a response
 cannot redirect the install to a different host. If a client receives such a field it must ignore it.
 
@@ -99,10 +103,14 @@ code's exposure window is bounded by its TTL — keep the TTL short; it is the o
 
 ## Transport
 
-- **HTTPS is required.** Clients refuse a plaintext claim URL before any request is made.
-- Redirects are followed to a maximum of 5, same-origin only.
+- **HTTPS is required.** Clients refuse a plaintext claim URL before any request is made. One
+  carve-out: plain http is accepted for loopback hosts (`localhost`, `127.0.0.1`, `::1`), so local
+  development works.
+- Redirects: only **307 and 308** are followed, because 301/302/303 discard the request body — and
+  the body carries the code. Maximum 5 redirects, same-origin only.
 - Clients use a 30-second timeout and make **one attempt with no automatic retry** — under
   make-before-break a failed exchange leaves the code live, so the user simply reruns the command.
+- Clients read at most 1 MiB of the response body.
 
 ## Versioning
 

@@ -245,6 +245,8 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			if normalizedURL, err = install.ValidateRemoteInstall(normalizedURL, parsedHeaders); err != nil {
 				return err
 			}
+			var nameFromServer bool
+			var namePending bool
 			if claimMode {
 				if dryRun {
 					if _, err := fmt.Fprintln(cmd.OutOrStdout(), "Dry run: no request was made to the claim URL; the claim code was not spent and is still valid."); err != nil {
@@ -254,9 +256,24 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 						if _, err := fmt.Fprintln(cmd.OutOrStdout(), "Dry run: the final server name is not known yet; it will come from --name, the claim response, or URL inference."); err != nil {
 							return err
 						}
+						// Internal validation key only; NamePending keeps it out
+						// of every output path.
 						name = "claim-name-pending"
+						namePending = true
 					}
 				} else {
+					// Every precondition that can be evaluated without the token is
+					// evaluated before the exchange: a run that is going to be
+					// refused must never spend the claim code.
+					if err := install.PreflightTargets(install.Options{
+						Clients: canonicalClients,
+						Yes:     yes,
+						Project: project,
+						NonTTY:  !isTerminal(cmd.InOrStdin()),
+						Env:     env,
+					}); err != nil {
+						return err
+					}
 					version, _, _ := buildVersionInfo()
 					resp, exchangeErr := claim.Exchange(validatedClaimURL, claimCode, version)
 					if exchangeErr != nil {
@@ -265,7 +282,11 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 					parsedHeaders["Authorization"] = "Bearer " + resp.Token
 					if name == "" {
 						if suggested := install.SanitizeName(resp.Name); suggested != "" {
+							if len(suggested) > 64 {
+								return fmt.Errorf("the claim response suggested a server name %d characters long; rerun with --name to choose a name", len(suggested))
+							}
 							name = suggested
+							nameFromServer = true
 						}
 					}
 					if err := printClaimExpiry(cmd.OutOrStdout(), resp.ExpiresAt); err != nil {
@@ -274,15 +295,17 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				}
 			}
 			result, err := install.InstallRemote(install.Options{
-				URL:     normalizedURL,
-				Name:    name,
-				Headers: parsedHeaders,
-				Clients: canonicalClients,
-				Yes:     yes,
-				Project: project,
-				DryRun:  dryRun,
-				Forget:  forget,
-				NonTTY:  !isTerminal(cmd.InOrStdin()),
+				URL:            normalizedURL,
+				Name:           name,
+				NameFromServer: nameFromServer,
+				NamePending:    namePending,
+				Headers:        parsedHeaders,
+				Clients:        canonicalClients,
+				Yes:            yes,
+				Project:        project,
+				DryRun:         dryRun,
+				Forget:         forget,
+				NonTTY:         !isTerminal(cmd.InOrStdin()),
 				ConfirmName: func(inferred string) (bool, error) {
 					var ok bool
 					form := huh.NewForm(huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Use inferred server name %q?", inferred)).Value(&ok)))
@@ -417,8 +440,8 @@ func parseEnvVars(values []string) (map[string]string, error) {
 
 func resolveToken(cmd *cobra.Command, args []string, tokenStdin bool, tokenEnv string) (string, error) {
 	if len(args) == 2 {
-		if strings.TrimSpace(args[1]) == "" {
-			return "", fmt.Errorf("token argument is empty")
+		if err := install.ValidateTokenValue(args[1]); err != nil {
+			return "", fmt.Errorf("token argument %v", err)
 		}
 		return args[1], nil
 	}
@@ -428,15 +451,18 @@ func resolveToken(cmd *cobra.Command, args []string, tokenStdin bool, tokenEnv s
 			return "", fmt.Errorf("read token from stdin: %w", err)
 		}
 		value := strings.TrimSpace(string(raw))
-		if value == "" {
-			return "", fmt.Errorf("token read from stdin is empty")
+		if err := install.ValidateTokenValue(value); err != nil {
+			return "", fmt.Errorf("token read from stdin %v", err)
 		}
 		return value, nil
 	}
 	if tokenEnv != "" {
 		value, ok := os.LookupEnv(tokenEnv)
-		if !ok || strings.TrimSpace(value) == "" {
+		if !ok {
 			return "", fmt.Errorf("environment variable %s is unset or empty", tokenEnv)
+		}
+		if err := install.ValidateTokenValue(value); err != nil {
+			return "", fmt.Errorf("environment variable %s %v", tokenEnv, err)
 		}
 		return value, nil
 	}
@@ -448,7 +474,14 @@ func resolveToken(cmd *cobra.Command, args []string, tokenStdin bool, tokenEnv s
 			if err != nil {
 				return "", err
 			}
-			return strings.TrimSpace(string(raw)), nil
+			value := strings.TrimSpace(string(raw))
+			if value == "" {
+				return "", nil
+			}
+			if err := install.ValidateTokenValue(value); err != nil {
+				return "", fmt.Errorf("token %v", err)
+			}
+			return value, nil
 		}
 	}
 	return "", nil

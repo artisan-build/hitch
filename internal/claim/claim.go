@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/artisan-build/hitch/internal/install"
 )
 
 // ContractVersion is the claim contract version this client speaks.
@@ -146,16 +148,26 @@ func Exchange(claimURL string, code string, hitchVersion string) (Response, erro
 		Transport:     transport,
 		CheckRedirect: checkRedirect,
 	}
+	display := redactedURL(validated)
 	resp, err := client.Do(req)
 	if err != nil {
-		return Response{}, fmt.Errorf("claim request to %s failed: %w", validated, unwrapURLError(err))
+		return Response{}, fmt.Errorf("claim request to %s failed: %w", display, unwrapURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
-		return Response{}, fmt.Errorf("claim response from %s could not be read: %w", validated, err)
+		return Response{}, fmt.Errorf("claim response from %s could not be read: %w", display, err)
 	}
-	return parseResponse(validated, resp.StatusCode, resp.Header.Get("Content-Type"), raw)
+	return parseResponse(display, resp.StatusCode, resp.Header.Get("Content-Type"), raw)
+}
+
+// redactedURL masks any userinfo password so a claim URL carrying credentials
+// never prints them in an error message.
+func redactedURL(raw string) string {
+	if parsed, err := url.Parse(raw); err == nil {
+		return parsed.Redacted()
+	}
+	return raw
 }
 
 // unwrapURLError drops the *url.Error layer so redirect refusals read as one
@@ -169,6 +181,11 @@ func unwrapURLError(err error) error {
 }
 
 func checkRedirect(req *http.Request, via []*http.Request) error {
+	// 301/302/303 turn the POST into a bodiless GET, so the claim code would
+	// never reach the destination. Only 307/308 preserve method and body.
+	if resp := req.Response; resp != nil && resp.StatusCode != http.StatusTemporaryRedirect && resp.StatusCode != http.StatusPermanentRedirect {
+		return fmt.Errorf("redirected with HTTP %d, which discards the POST body carrying the claim code; only 307/308 redirects are followed", resp.StatusCode)
+	}
 	origin := via[0].URL
 	if req.URL.Scheme != origin.Scheme || req.URL.Host != origin.Host {
 		return fmt.Errorf("redirected cross-origin to another host; refusing to send the claim code there")
@@ -180,46 +197,61 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 }
 
 // parseResponse walks the detection ladder. The enum is the contract: any JSON
-// body carrying `error` is branched on regardless of HTTP status, an unknown
+// object carrying `error` is branched on regardless of HTTP status, an unknown
 // enum value is a generic failure, and everything else falls through to the
 // not-a-claim-endpoint message — which describes the body without quoting it.
+// Fields are read leniently, one at a time, so a wrong type on one field
+// cannot discard the enum carried by another.
 func parseResponse(claimURL string, status int, contentType string, raw []byte) (Response, error) {
-	var payload struct {
-		Version   *int    `json:"version"`
-		Token     string  `json:"token"`
-		Name      string  `json:"name"`
-		ExpiresAt *string `json:"expires_at"`
-		ErrorCode *string `json:"error"`
-		Message   string  `json:"message"`
+	var generic map[string]any
+	if json.Unmarshal(raw, &generic) != nil {
+		return Response{}, &NotClaimEndpointError{ClaimURL: claimURL, Got: describeRawBody(status, contentType)}
 	}
-	jsonErr := json.Unmarshal(raw, &payload)
-	if jsonErr == nil && payload.ErrorCode != nil && *payload.ErrorCode != "" {
-		return Response{}, &EnumError{Code: *payload.ErrorCode, Message: payload.Message}
+	stringField := func(key string) string {
+		if s, ok := generic[key].(string); ok {
+			return s
+		}
+		return ""
 	}
-	if jsonErr == nil && payload.Version != nil && *payload.Version > ContractVersion {
-		return Response{}, &NewerContractError{ClaimURL: claimURL, Version: *payload.Version}
+	if code := stringField("error"); code != "" {
+		return Response{}, &EnumError{Code: code, Message: stringField("message")}
 	}
-	if jsonErr == nil && payload.Token != "" && status >= 200 && status < 300 {
-		out := Response{Token: payload.Token, Name: payload.Name}
-		if payload.ExpiresAt != nil && *payload.ExpiresAt != "" {
-			if ts, parseErr := time.Parse(time.RFC3339, *payload.ExpiresAt); parseErr == nil {
+	if version, ok := generic["version"].(float64); ok && int(version) > ContractVersion {
+		return Response{}, &NewerContractError{ClaimURL: claimURL, Version: int(version)}
+	}
+	token := stringField("token")
+	if usableToken(token) && status >= 200 && status < 300 {
+		out := Response{Token: token, Name: stringField("name")}
+		if expiresAt := stringField("expires_at"); expiresAt != "" {
+			if ts, parseErr := time.Parse(time.RFC3339, expiresAt); parseErr == nil {
 				out.ExpiresAt = ts
 			}
 		}
 		return out, nil
 	}
-	return Response{}, &NotClaimEndpointError{ClaimURL: claimURL, Got: describeBody(status, contentType, jsonErr, payload.Token != "")}
+	return Response{}, &NotClaimEndpointError{ClaimURL: claimURL, Got: describeJSONBody(status, token)}
 }
 
-func describeBody(status int, contentType string, jsonErr error, hasToken bool) string {
-	if jsonErr != nil {
-		if mediaType := strings.TrimSpace(strings.Split(contentType, ";")[0]); mediaType != "" {
-			return fmt.Sprintf("%s (HTTP %d)", mediaType, status)
-		}
-		return fmt.Sprintf("an unparseable body (HTTP %d)", status)
+// usableToken applies the shared token validation — the very function the
+// positional, stdin, env, and prompt sources use — so the claim path cannot
+// accept a value any other source would refuse.
+func usableToken(token string) bool {
+	return install.ValidateTokenValue(token) == nil
+}
+
+func describeRawBody(status int, contentType string) string {
+	if mediaType := strings.TrimSpace(strings.Split(contentType, ";")[0]); mediaType != "" {
+		return fmt.Sprintf("%s (HTTP %d)", mediaType, status)
 	}
-	if hasToken {
-		return fmt.Sprintf("HTTP %d", status)
+	return fmt.Sprintf("an unparseable body (HTTP %d)", status)
+}
+
+func describeJSONBody(status int, token string) string {
+	if token == "" {
+		return fmt.Sprintf("JSON without a \"token\" field (HTTP %d)", status)
 	}
-	return fmt.Sprintf("JSON without a \"token\" field (HTTP %d)", status)
+	if !usableToken(token) {
+		return fmt.Sprintf("JSON with an unusable \"token\" value (HTTP %d)", status)
+	}
+	return fmt.Sprintf("HTTP %d", status)
 }

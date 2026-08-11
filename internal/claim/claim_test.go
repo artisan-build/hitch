@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -222,6 +223,80 @@ func TestExchangeRedirectRules(t *testing.T) {
 	})
 }
 
+func TestExchangeRedirectKinds(t *testing.T) {
+	for _, tt := range []struct {
+		status  int
+		allowed bool
+	}{
+		{status: http.StatusMovedPermanently},
+		{status: http.StatusFound},
+		{status: http.StatusSeeOther},
+		{status: http.StatusTemporaryRedirect, allowed: true},
+		{status: http.StatusPermanentRedirect, allowed: true},
+	} {
+		t.Run(fmt.Sprintf("HTTP %d", tt.status), func(t *testing.T) {
+			var destHits int32
+			var destMethod string
+			var destBody []byte
+			mux := http.NewServeMux()
+			server := httptest.NewServer(mux)
+			t.Cleanup(server.Close)
+			mux.HandleFunc("/start", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Location", server.URL+"/dest")
+				w.WriteHeader(tt.status)
+			})
+			mux.HandleFunc("/dest", func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&destHits, 1)
+				destMethod = r.Method
+				destBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"version":1,"token":"tok-redirect"}`)
+			})
+			resp, err := Exchange(server.URL+"/start", "A1B2-C3D4", "test")
+			if tt.allowed {
+				if err != nil {
+					t.Fatalf("Exchange err = %v, want the %d redirect followed", err, tt.status)
+				}
+				if resp.Token != "tok-redirect" {
+					t.Fatalf("token = %q, want tok-redirect", resp.Token)
+				}
+				if destMethod != http.MethodPost || !strings.Contains(string(destBody), "A1B2-C3D4") {
+					t.Fatalf("destination saw %s with body %q, want a POST carrying the claim code", destMethod, destBody)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "only 307/308 redirects are followed") {
+				t.Fatalf("Exchange err = %v, want the body-discarding-redirect refusal", err)
+			}
+			if n := atomic.LoadInt32(&destHits); n != 0 {
+				t.Fatalf("destination hits = %d, want 0 — the code must never be delivered bodiless", n)
+			}
+		})
+	}
+}
+
+func TestExchangeRedactsClaimURLUserinfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<html>nope</html>")
+	}))
+	t.Cleanup(server.Close)
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	_, err = Exchange("http://alice:hunter2@"+parsed.Host+"/claim", "A1B2-C3D4", "test")
+	if err == nil {
+		t.Fatalf("Exchange err = nil, want the not-a-claim-endpoint failure")
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("error text leaked the claim URL password: %v", err)
+	}
+	if !strings.Contains(err.Error(), "xxxxx") {
+		t.Fatalf("error text should carry the redacted userinfo marker: %v", err)
+	}
+}
+
 func TestExchangeResponseLadder(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
@@ -365,6 +440,48 @@ func TestExchangeResponseLadder(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), "does not speak the hitch claim contract") {
 					t.Fatalf("err = %v, want the claim-contract framing", err)
+				}
+			},
+		},
+		{
+			name: "a wrong type on version does not hide the error enum", status: http.StatusGone, contentType: "application/json",
+			body: `{"version":"1","error":"code_expired","message":"Expired."}`,
+			check: func(t *testing.T, _ Response, err error) {
+				var enumErr *EnumError
+				if !errors.As(err, &enumErr) || enumErr.Code != "code_expired" {
+					t.Fatalf("err = %v, want EnumError code_expired despite the string-typed version", err)
+				}
+			},
+		},
+		{
+			name: "a wrong type on version does not sink a usable token", status: http.StatusOK, contentType: "application/json",
+			body: `{"version":"1","token":"tok-1"}`,
+			check: func(t *testing.T, resp Response, err error) {
+				if err != nil || resp.Token != "tok-1" {
+					t.Fatalf("resp = %+v err = %v, want success with tok-1", resp, err)
+				}
+			},
+		},
+		{
+			name: "a blank token is unusable", status: http.StatusOK, contentType: "application/json",
+			body: `{"version":1,"token":"   "}`,
+			check: func(t *testing.T, _ Response, err error) {
+				var notClaim *NotClaimEndpointError
+				if !errors.As(err, &notClaim) || !strings.Contains(notClaim.Got, "unusable") {
+					t.Fatalf("err = %v, want NotClaimEndpointError naming an unusable token", err)
+				}
+			},
+		},
+		{
+			name: "control characters in the token are refused without echoing them", status: http.StatusOK, contentType: "application/json",
+			body: `{"version":1,"token":"good\r\nX-Injected: 1"}`,
+			check: func(t *testing.T, _ Response, err error) {
+				var notClaim *NotClaimEndpointError
+				if !errors.As(err, &notClaim) || !strings.Contains(notClaim.Got, "unusable") {
+					t.Fatalf("err = %v, want NotClaimEndpointError naming an unusable token", err)
+				}
+				if strings.Contains(err.Error(), "X-Injected") {
+					t.Fatalf("error text leaked the injected header shape: %v", err)
 				}
 			},
 		},

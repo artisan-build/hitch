@@ -224,6 +224,7 @@ func TestInstallClaimOddServerResponsesNeverEchoToken(t *testing.T) {
 		{name: "token with 503", status: http.StatusServiceUnavailable, contentType: "application/json", body: `{"version":1,"token":"` + sentinel + `"}`, wantErr: "does not speak the hitch claim contract", wantAlt: true},
 		{name: "json without token", status: http.StatusOK, contentType: "application/json", body: `{"version":1,"hint":"` + sentinel + `"}`, wantErr: `JSON without a "token" field`, wantAlt: true},
 		{name: "newer contract version", status: http.StatusOK, contentType: "application/json", body: `{"version":2,"token":"` + sentinel + `"}`, wantErr: "newer than this hitch understands"},
+		{name: "control characters in the token", status: http.StatusOK, contentType: "application/json", body: `{"version":1,"token":"` + sentinel + `\r\nX-Injected: 1"}`, wantErr: `unusable "token" value`, wantAlt: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			server, _ := startClaimRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -452,6 +453,214 @@ func TestInstallClaimRequiresHTTPSClaimURL(t *testing.T) {
 				t.Fatalf("config was written, stat err = %v", err)
 			}
 		})
+	}
+}
+
+func TestInstallClaimNonTTYWithoutYesOrClientMakesNoRequest(t *testing.T) {
+	server, hits := startClaimRecorder(t, claimJSON(http.StatusOK, `{"version":1,"token":"tok-should-never-be-fetched"}`))
+	home := t.TempDir()
+	mkdirAll(t, filepath.Join(home, ".cursor"))
+	code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim")
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero; stdout=%q", stdout)
+	}
+	if !strings.Contains(stderr, "--yes") || !strings.Contains(stderr, "--client") {
+		t.Fatalf("stderr = %q, want both flags named", stderr)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Fatalf("claim requests = %d, want ZERO — a run that will be refused must not spend the code", n)
+	}
+}
+
+func TestInstallClaimNoDetectedHarnessesMakesNoRequest(t *testing.T) {
+	server, hits := startClaimRecorder(t, claimJSON(http.StatusOK, `{"version":1,"token":"tok-should-never-be-fetched"}`))
+	home := t.TempDir()
+	code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim", "--yes")
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero; stdout=%q", stdout)
+	}
+	if !strings.Contains(stderr, "no detected file-writer harnesses") {
+		t.Fatalf("stderr = %q, want the no-harnesses refusal", stderr)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Fatalf("claim requests = %d, want ZERO — a run that will be refused must not spend the code", n)
+	}
+}
+
+const collisionCursorSeed = "{\n  \"mcpServers\": {\n    \"existing-server\": {\n      \"url\": \"https://mine.internal/mcp\",\n      \"headers\": {\n        \"Authorization\": \"Bearer ZZMYPRECIOUSZZ\"\n      }\n    }\n  }\n}\n"
+
+func TestInstallClaimServerNameCollision(t *testing.T) {
+	const token = "tok_SENTINEL_collision"
+
+	t.Run("a server-chosen name may not overwrite an existing entry", func(t *testing.T) {
+		server, _ := startClaimRecorder(t, claimJSON(http.StatusOK, `{"version":1,"token":"`+token+`","name":"existing-server"}`))
+		home := t.TempDir()
+		writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), collisionCursorSeed, 0o600)
+		before := treeBytes(t, home)
+		code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim", "--client", "cursor")
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1; stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, `the claim response suggested the name "existing-server"`) || !strings.Contains(stdout, "rerun with --name") {
+			t.Fatalf("stdout = %q, want the collision refusal naming --name", stdout)
+		}
+		if !reflect.DeepEqual(before, treeBytes(t, home)) {
+			t.Fatalf("configs changed after a refused server-name collision")
+		}
+		if strings.Contains(stdout+stderr, "ZZMYPRECIOUSZZ") || strings.Contains(stdout+stderr, token) {
+			t.Fatalf("output leaked a credential; stdout=%q stderr=%q", stdout, stderr)
+		}
+	})
+
+	t.Run("positive control: the user's --name may overwrite", func(t *testing.T) {
+		server, _ := startClaimRecorder(t, claimJSON(http.StatusOK, `{"version":1,"token":"`+token+`","name":"other"}`))
+		home := t.TempDir()
+		writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), collisionCursorSeed, 0o600)
+		code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim", "--client", "cursor", "--name", "existing-server")
+		if code != 0 {
+			t.Fatalf("exit code = %d; stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		raw := readText(t, filepath.Join(home, ".cursor", "mcp.json"))
+		if !strings.Contains(raw, token) || strings.Contains(raw, "ZZMYPRECIOUSZZ") {
+			t.Fatalf("config = %q, want the user-directed overwrite to have replaced the old credential", raw)
+		}
+	})
+
+	t.Run("only the colliding target is refused", func(t *testing.T) {
+		server, _ := startClaimRecorder(t, claimJSON(http.StatusOK, `{"version":1,"token":"`+token+`","name":"existing-server"}`))
+		home := t.TempDir()
+		writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), collisionCursorSeed, 0o600)
+		code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim", "--client", "cursor", "--client", "zed")
+		if code != 0 {
+			t.Fatalf("exit code = %d; stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Not configured: Cursor:") || !strings.Contains(stdout, `Configured Zed "existing-server"`) {
+			t.Fatalf("stdout = %q, want cursor refused and zed configured", stdout)
+		}
+		if got := readText(t, filepath.Join(home, ".cursor", "mcp.json")); got != collisionCursorSeed {
+			t.Fatalf("colliding cursor config changed:\n%s", got)
+		}
+		if raw := readText(t, filepath.Join(home, ".config", "zed", "settings.json")); !strings.Contains(raw, token) {
+			t.Fatalf("zed config = %q, want the token installed there", raw)
+		}
+	})
+}
+
+func TestInstallClaimRefusesAbsurdlyLongResponseName(t *testing.T) {
+	const token = "tok_SENTINEL_long_name"
+	longName := strings.Repeat("a", 5000)
+	server, _ := startClaimRecorder(t, claimJSON(http.StatusOK, `{"version":1,"token":"`+token+`","name":"`+longName+`"}`))
+	home := t.TempDir()
+	code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim", "--client", "cursor")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "5000 characters") || !strings.Contains(stderr, "rerun with --name") {
+		t.Fatalf("stderr = %q, want the length refusal pointing at --name", stderr)
+	}
+	if strings.Contains(stdout+stderr, longName[:100]) || strings.Contains(stdout+stderr, token) {
+		t.Fatalf("output echoed the oversized name or the token")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("config was written, stat err = %v", err)
+	}
+}
+
+func TestInstallClaimDryRunNeverSurfacesThePlaceholderName(t *testing.T) {
+	success := claimJSON(http.StatusOK, `{"version":1,"token":"tok-unused"}`)
+
+	t.Run("detected codex gets a pending note, not the placeholder", func(t *testing.T) {
+		server, _ := startClaimRecorder(t, success)
+		home := t.TempDir()
+		mkdirAll(t, filepath.Join(home, ".cursor"))
+		mkdirAll(t, filepath.Join(home, ".codex"))
+		code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim", "--yes", "--dry-run")
+		if code != 0 {
+			t.Fatalf("exit code = %d; stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		out := stdout + stderr
+		if strings.Contains(out, "claim-name-pending") || strings.Contains(out, "CLAIM_NAME_PENDING") {
+			t.Fatalf("the internal placeholder surfaced in output:\n%s", out)
+		}
+		if !strings.Contains(stdout, "manual instructions omitted from this dry run") {
+			t.Fatalf("stdout missing the pending-name Codex note: %q", stdout)
+		}
+		if !strings.Contains(stdout, "final server name is not known") {
+			t.Fatalf("stdout missing the unknown-name note: %q", stdout)
+		}
+	})
+
+	t.Run("an explicit codex target gets the same pending note", func(t *testing.T) {
+		server, _ := startClaimRecorder(t, success)
+		home := t.TempDir()
+		code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim", "--client", "codex", "--dry-run")
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1; stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		out := stdout + stderr
+		if strings.Contains(out, "claim-name-pending") || strings.Contains(out, "CLAIM_NAME_PENDING") {
+			t.Fatalf("the internal placeholder surfaced in output:\n%s", out)
+		}
+		if !strings.Contains(stdout, "manual instructions omitted from this dry run") {
+			t.Fatalf("stdout missing the pending-name Codex note: %q", stdout)
+		}
+	})
+}
+
+func TestInstallClaimWritesConfigAt0600(t *testing.T) {
+	server, _ := startClaimRecorder(t, claimJSON(http.StatusOK, `{"version":1,"token":"tok-mode","name":"ballast"}`))
+	home := t.TempDir()
+	code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim", "--client", "cursor")
+	if code != 0 {
+		t.Fatalf("exit code = %d; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	info, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json"))
+	if err != nil {
+		t.Fatalf("stat written config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("config mode = %o, want 0600", perm)
+	}
+}
+
+func TestInstallClaimRefusesToClobberUnparseableConfig(t *testing.T) {
+	const token = "tok_SENTINEL_clobber"
+	server, hits := startClaimRecorder(t, claimJSON(http.StatusOK, `{"version":1,"token":"`+token+`","name":"ballast"}`))
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{not-json", 0o600)
+	before := treeBytes(t, home)
+	code, stdout, stderr := runMain(t, home, "install", installURL, "--claim", "A1B2-C3D4", "--claim-url", server.URL+"/claim", "--client", "cursor")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Not configured: Cursor:") || !strings.Contains(stdout, "not valid JSON") {
+		t.Fatalf("stdout = %q, want the refuse-to-clobber report", stdout)
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Fatalf("claim requests = %d, want 1 (the exchange precedes the write attempt)", n)
+	}
+	if !reflect.DeepEqual(before, treeBytes(t, home)) {
+		t.Fatalf("the unparseable config was rewritten")
+	}
+	if strings.Contains(stdout+stderr, token) {
+		t.Fatalf("output leaked the token; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestInstallPositionalTokenRejectsControlCharacters(t *testing.T) {
+	home := t.TempDir()
+	code, stdout, stderr := runMain(t, home, "install", installURL, "tok\r\nX-Injected: 1", "--client", "cursor")
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero; stdout=%q", stdout)
+	}
+	if !strings.Contains(stderr, "token argument contains control characters") {
+		t.Fatalf("stderr = %q, want the shared control-character refusal", stderr)
+	}
+	if strings.Contains(stdout+stderr, "X-Injected") {
+		t.Fatalf("output echoed the injected token; stdout=%q stderr=%q", stdout, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("config was written, stat err = %v", err)
 	}
 }
 
