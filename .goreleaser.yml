@@ -47,7 +47,12 @@ homebrew_casks:
     repository:
       owner: artisan-build
       name: homebrew-tap
-      token: "{{ index .Env \"HOMEBREW_TAP_GITHUB_TOKEN\" }}"
+      # GoReleaser validates this field to be exactly `{{ .Env.VAR }}` — the
+      # `index .Env "..."` form is rejected with "expected {{ .Env.VAR_NAME }}
+      # only". release.yml always defines this variable (empty when the secret
+      # is unset), so the plain form resolves rather than erroring, and
+      # skip_upload below still guards the actual upload.
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Casks
     homepage: https://github.com/artisan-build/hitch
     description: Install MCP servers into coding agents safely

@@ -3,10 +3,10 @@
 Install an MCP server into coding agents on your machine with one command, while handling the
 credential carefully — and find and remove every copy of it later.
 
-> **Status: pre-release.** v0.0.5 ships `curl | sh` and `go install`; Homebrew and npm publishing are
+> **Status: pre-release.** v0.0.6 ships `curl | sh` and `go install`; Homebrew and npm publishing are
 > wired but waiting on publisher tokens.
 
-## Current Release: v0.0.5
+## Current Release: v0.0.6
 
 Every MCP client stores server config in a different file, under a different key, with a different
 schema for the same server. `hitch` detects the harnesses you actually have, **asks which ones you
@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/artisan-build/hitch/main/install.sh
 Install from source with Go:
 
 ```sh
-go install github.com/artisan-build/hitch@v0.0.5
+go install github.com/artisan-build/hitch@v0.0.6
 ```
 
 Coming soon:
