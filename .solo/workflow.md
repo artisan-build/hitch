@@ -54,12 +54,21 @@ that the log names the test you predicted.
 - command: `go mod download`
 - post-install: none. Requires Go 1.23+ and golangci-lint on PATH.
 
-## Harness map (role → runtime; decorrelate by ROLE/FRAMING, not model lineage)
-- Only **Claude (agent_tool_id 3)** and **OpenCode (agent_tool_id 2)** run reliably in this Solo env.
-- implementer: OpenCode (`agent_tool_id 2`) — persistent agent in the PR worktree (`extra_args=["<path>"]`).
-- quality reviewer: Claude (`agent_tool_id 3`), one-shot, ADVERSARIAL ("find what's wrong; default reject").
-- acceptance judge: Claude (`agent_tool_id 3`) — judges against each PR's acceptance criteria in the
-  spec, reading REAL gate/test output, not the implementer's claims.
+## Harness map (role → runtime)
+
+**Resolve every role through `~/Herd/brain/playbooks/resolve-agent-role.md` against
+`~/Herd/brain/agents.json`.** That file is the fleet-wide authority; this profile does not restate it.
+
+The copied runtime bindings, hardcoded Solo `agent_tool_id`s, and obsolete claim that only two runtimes
+worked reliably in this Solo environment were removed on 2026-08-31. Fleet bindings change, ids drift
+when tools are re-added, and the excluded runtimes have since run successfully under Solo.
+
+- Decorrelate review by **role and framing, not model lineage**. Give the quality reviewer one-shot,
+  adversarial framing: "find what's wrong; default reject."
+- The acceptance judge evaluates against each PR's acceptance criteria in the spec and must read real
+  gate and test output rather than the implementer's claims.
+- Spawn every harness in the intended worktree: **opencode** takes the worktree path as its last
+  positional argument, **codex** takes `-C <path>`, and **claude** takes `--add-dir <path>`.
 
 ## Toolchain conformance — the ride-along rule (STANDING, all projects)
 Go equivalent of `composer ready`: run `gofmt -w .` and `go mod tidy` when finalizing EVERY PR, and
