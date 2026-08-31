@@ -76,7 +76,11 @@ async function main() {
     await tar.x({ file: archive, cwd: tmp });
     const hitch = path.join(tmp, 'hitch');
     fs.chmodSync(hitch, 0o755);
-    const result = spawnSync(hitch, ['install', ...process.argv.slice(2)], { stdio: 'inherit' });
+    // Keep this list in sync with the commands registered in internal/cmd/root.go.
+    const knownCommands = new Set(['install', 'list', 'prompt', 'scan', 'uninstall', 'version']);
+    const args = process.argv.slice(2);
+    const argv = knownCommands.has(args[0]) ? args : ['install', ...args];
+    const result = spawnSync(hitch, argv, { stdio: 'inherit' });
     // Set exitCode instead of calling process.exit, which would skip the finally cleanup.
     process.exitCode = result.status == null ? 1 : result.status;
   } finally {
