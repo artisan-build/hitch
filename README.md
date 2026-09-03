@@ -5,7 +5,9 @@ credential carefully — and find and remove every copy of it later.
 
 > **Status: pre-release.** Installable four ways — `curl | sh`, `go install`, Homebrew, and `npx`.
 
-## Current Release: v0.1.0
+## Current Release: v0.1.1
+
+See [CHANGELOG.md](CHANGELOG.md) for what each release changed.
 
 Every MCP client stores server config in a different file, under a different key, with a different
 schema for the same server. `hitch` detects the harnesses you actually have, **asks which ones you
@@ -50,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/artisan-build/hitch/main/install.sh
 Install from source with Go:
 
 ```sh
-go install github.com/artisan-build/hitch@v0.1.0
+go install github.com/artisan-build/hitch@v0.1.1
 ```
 
 Install with Homebrew:
@@ -66,9 +68,16 @@ npx hitch-mcp https://example.com/mcp --token-stdin -c claude-code
 ```
 
 The npm package is a shim: it downloads the released binary for your platform, verifies it against
-the release checksums, and runs `hitch install` with the arguments you passed. Its version always
-matches the release it fetches, and it is published from CI via npm trusted publishing, so every
-version from 0.0.7 onward carries a provenance attestation you can verify with `npm audit signatures`.
+the release checksums, and runs it. Any hitch subcommand works through it — `npx hitch-mcp scan`,
+`npx hitch-mcp uninstall <name>` — and arguments that are not a subcommand default to `install`, so
+`npx hitch-mcp <url>` installs. Its version always matches the release it fetches, and it is
+published from CI via npm trusted publishing, so every version from 0.0.7 onward carries a
+provenance attestation you can verify with `npm audit signatures`.
+
+> **`hitch-mcp@0.1.0` mishandles subcommands.** It prefixed `install` onto every invocation, so
+> `npx hitch-mcp uninstall example` wrote a server named `uninstall` pointing at `https://uninstall`
+> instead of removing anything. Fixed in 0.1.1; if you ran a subcommand through npx on 0.1.0, run
+> `hitch scan` and remove any stray entry it reports.
 
 ## Install a remote MCP server
 
