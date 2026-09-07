@@ -73,9 +73,17 @@ jobs:
       # runner's checkout. The version it writes is what the unconditional publish
       # below ships on every tag: this binding is what keeps the npm version equal
       # to the release tag.
+      #
+      # --allow-same-version is load-bearing, not defensive. The repo's committed
+      # package.json is reconciled to the version being released, so on the normal
+      # path the tag and the file already agree, and plain `npm version <same>`
+      # exits 1 with "Version not changed". That failure lands AFTER goreleaser has
+      # published the GitHub Release and the Homebrew cask, leaving a release with
+      # no matching npm package. The flag makes this step idempotent whether the
+      # committed version already matches the tag or trails it.
       - name: Set npm shim version from tag
         working-directory: npm/hitch-mcp
-        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
 
       # Publishing is unconditional: every tag publishes the shim, and if the OIDC
       # exchange breaks the release fails loudly right here. Authentication is npm

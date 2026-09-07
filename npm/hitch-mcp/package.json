@@ -1,7 +1,16 @@
 {
   "name": "hitch-mcp",
-  "version": "0.0.1",
+  "version": "0.1.1",
   "description": "npx shim for installing MCP servers with hitch",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "cli",
+    "claude-code",
+    "codex",
+    "cursor",
+    "agent"
+  ],
   "bin": {
     "hitch-mcp": "bin/hitch-mcp.js"
   },
@@ -12,6 +21,10 @@
     "test": "node --test test/*.test.js"
   },
   "license": "MIT",
+  "author": "Artisan Build",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/artisan-build/hitch.git"
