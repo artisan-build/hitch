@@ -664,7 +664,7 @@ func uninstallPickerModel(targets []install.ScanResult, unreadable []install.Sca
 	}
 	model := make([]uninstallPickerOption, 0, len(targets))
 	for _, target := range targets {
-		model = append(model, uninstallPickerOption{ID: target.Client.ID, Label: fmt.Sprintf("%s\t%s\t(%s)", target.Client.Name, target.Path, credentialLabel(target.HoldsCredential))})
+		model = append(model, uninstallPickerOption{ID: target.Client.ID, Label: fmt.Sprintf("%s\t%s\t(%s)", target.Client.Name, target.Path, scanAuthLabel(target))})
 	}
 	return model, warnings
 }
@@ -710,6 +710,13 @@ func credentialLabel(holds bool) string {
 		return "holds a credential"
 	}
 	return "no credential"
+}
+
+func scanAuthLabel(result install.ScanResult) string {
+	if result.Auth == install.AuthOAuth {
+		return "OAuth (token held by harness)"
+	}
+	return credentialLabel(result.HoldsCredential)
 }
 
 func defaultSelectedTargetIDs(targets []install.Target, preferred map[string]bool) []string {
@@ -817,7 +824,7 @@ func printScanResults(out io.Writer, results []install.ScanResult) error {
 		status := "no entry"
 		switch result.Status {
 		case install.ScanHasEntry:
-			status = "has entry (" + credentialLabel(result.HoldsCredential) + ")"
+			status = "has entry (" + scanAuthLabel(result) + ")"
 		case install.ScanUnreadable:
 			status = "UNREADABLE - cannot verify"
 		}
@@ -887,12 +894,31 @@ func newUninstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 
 func printUninstallSummary(out io.Writer, result install.UninstallResult) error {
 	for _, removed := range result.Removed {
-		if _, err := fmt.Fprintf(out, "Removed %s %q (%s, %s)\n", removed.Client.Name, result.Name, removed.Path, credentialLabel(removed.HoldsCredential)); err != nil {
+		if _, err := fmt.Fprintf(out, "Removed %s %q (%s, %s)\n", removed.Client.Name, result.Name, removed.Path, scanAuthLabel(removed)); err != nil {
 			return err
+		}
+		if removed.Auth == install.AuthOAuth {
+			if _, err := fmt.Fprintf(out, "Hitch removed the config entry but did not remove %s's stored OAuth token.\n", removed.Client.Name); err != nil {
+				return err
+			}
+			guidance := harness.OAuthLifecycleGuidanceByClientID(removed.Client.ID, result.Name)
+			if guidance.LogoutCommand != "" {
+				if _, err := fmt.Fprintf(out, "Remove the stored token with `%s`.\n", guidance.LogoutCommand); err != nil {
+					return err
+				}
+			} else {
+				origin, err := install.OAuthOrigin(removed.OAuthServerURL)
+				if err != nil {
+					return err
+				}
+				if _, err := fmt.Fprintf(out, "Revoke it through the server's account or token management at %s.\n", origin); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	for _, kept := range result.Kept {
-		if _, err := fmt.Fprintf(out, "Kept %s %q (%s, %s)\n", kept.Client.Name, result.Name, kept.Path, credentialLabel(kept.HoldsCredential)); err != nil {
+		if _, err := fmt.Fprintf(out, "Kept %s %q (%s, %s)\n", kept.Client.Name, result.Name, kept.Path, scanAuthLabel(kept)); err != nil {
 			return err
 		}
 	}
@@ -910,7 +936,8 @@ func printUninstallSummary(out io.Writer, result install.UninstallResult) error 
 }
 
 func newPromptCommand() *cobra.Command {
-	return &cobra.Command{
+	var oauthOverride bool
+	cmd := &cobra.Command{
 		Use:   "prompt <url>",
 		Short: "Print manual setup prompts for clients hitch does not write",
 		Args: func(_ *cobra.Command, args []string) error {
@@ -920,7 +947,11 @@ func newPromptCommand() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			url, err := install.NormalizeRemoteURL(args[0])
+			probeURL, err := install.ValidateRemoteInstall(args[0], nil)
+			if err != nil {
+				return err
+			}
+			url, err := install.SanitizeOAuthURL(probeURL)
 			if err != nil {
 				return err
 			}
@@ -928,10 +959,24 @@ func newPromptCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			oauthMode := oauthOverride
+			if !oauthMode {
+				oauthMode = detectOAuth(probeURL)
+			}
+			if oauthMode {
+				origin, originErr := install.OAuthOrigin(url)
+				if originErr != nil {
+					return originErr
+				}
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Desktop: open Customize > Connectors, choose + Add > Add custom connector, enter %q with URL %s, then choose the documented sign-in option and connect.\nOfficial setup: %s\n\nJetBrains: current official documentation establishes remote HTTP configuration but does not establish a native OAuth login step. In Settings > Tools > AI Assistant > Model Context Protocol (MCP), add an HTTP server with URL %s. If sign-in is required, follow the server vendor's account setup at %s.\nOfficial setup and limitation source: %s\n\nCodex: run:\ncodex mcp add %s --url %s\ncodex mcp login %s\nOfficial setup: %s\n", name, url, harness.ClaudeDesktopOAuthSetupSource, url, origin, harness.JetBrainsMCPSetupSource, name, url, name, harness.CodexOAuthSetupSource)
+				return err
+			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Desktop: add a stdio MCP entry that runs mcp-remote for %s; hitch does not write it because remote HTTP requires a local proxy and Node runtime.\n\nJetBrains: add this MCP server through the JetBrains MCP UI for %s; hitch does not write it because the dialog has no Authorization-headers field.\n\nCodex: hitch does not install Codex automatically yet, but hitch scan and uninstall can verify and remove this manual entry later. Add this to Codex config manually:\n[%s]\nurl = %q\nbearer_token_env_var = \"%s\"\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN\n", url, url, install.CodexServerTableHeader(name), url, install.CodexTokenEnvVar(name), install.CodexTokenEnvVar(name))
 			return err
 		},
 	}
+	cmd.Flags().BoolVar(&oauthOverride, "oauth", false, "print OAuth manual setup without probing")
+	return cmd
 }
 
 func isTerminal(in io.Reader) bool {

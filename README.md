@@ -14,6 +14,8 @@ schema for the same server. `hitch` detects the harnesses you actually have, **a
 want this server in**, and writes the correct config for each.
 
 - **Remote HTTP and stdio servers** into the seven JSON-backed clients listed below.
+- **Harness-owned OAuth** — hitch conservatively detects protected-resource metadata, skips the
+  nonexistent token prompt, and writes only the six clients whose native OAuth support is verified.
 - **Credentials done properly** — never echoed, never printed, written atomically at `0600`, and a
   config that won't parse is reported rather than clobbered.
 - **Single-use claim codes** — `--claim` exchanges a short-lived code for the token at install time,
@@ -30,7 +32,12 @@ want this server in**, and writes the correct config for each.
 
 ## Supported harnesses
 
-Written by hitch: Claude Code · Cursor · Windsurf · Zed · VS Code · Gemini CLI · opencode
+Written by hitch for bearer/custom-header installs: Claude Code · Cursor · Windsurf · Zed · VS Code
+· Gemini CLI · opencode
+
+For OAuth servers, hitch writes the six verified capable harnesses: Claude Code · Cursor · Windsurf
+· Zed · Gemini CLI · opencode. VS Code is skipped because current official evidence does not establish
+native MCP OAuth for hitch's config shape. Every skip is printed honestly and points to `hitch prompt`.
 
 Codex is detected but not configured automatically. When Codex is detected or selected, hitch prints
 manual `[mcp_servers.<name>]` instructions using `bearer_token_env_var` and an
@@ -85,6 +92,18 @@ provenance attestation you can verify with `npm audit signatures`.
 hitch install https://example.com/mcp --token-stdin -c claude-code
 ```
 
+For a server that advertises MCP OAuth, use the same URL with no token:
+
+```sh
+npx hitch-mcp https://example.com/mcp --name example
+```
+
+hitch probes conservatively for a `401` protected-resource metadata challenge. A bare `401`, timeout,
+connection error, or inconclusive response keeps the existing bearer-token flow unchanged. Use
+`--oauth` to force OAuth mode without a network probe; it is mutually exclusive with token,
+Authorization-header, and claim inputs. The selected harness opens the browser sign-in when it first
+connects.
+
 You may pass the token as the optional second positional argument, but passing the token as an
 argument leaves **copies hitch cannot remove** — in your shell history, and (if you used `npx`) in
 `~/.npm/_logs/`. `hitch scan` and `hitch uninstall` find and remove the copies in your harness
@@ -131,8 +150,15 @@ hitch uninstall stripe
 ```
 
 `scan` reports, for every client, whether the server is present, whether that entry holds a
-credential, and which configs it could not read. `uninstall` either removes only that server's entry
-cleanly, or reports that it cannot verify the file and leaves it unchanged.
+credential, and which configs it could not read. OAuth entries installed by hitch are reported as
+`OAuth (token held by harness)`. This classification comes from hitch's token-free installation
+metadata and is used only while client, scope, config path, server name, and sanitized URL still
+match the real entry.
+
+`uninstall` either removes only that server's entry cleanly, or reports that it cannot verify the file
+and leaves it unchanged. Removing an OAuth config entry does not itself remove the token from the
+harness's token store, so hitch prints the officially documented logout command where one exists or
+points to the sanitized server origin for account-side revocation.
 
 ## Manual setup for the rest
 
@@ -142,6 +168,18 @@ hitch prompt https://example.com/mcp
 
 Prints ready-to-follow instructions for Claude Desktop, JetBrains, and manual Codex setup. Codex is
 manual-install only; `scan` and `uninstall` are supported for user-global Codex config.
+
+`hitch prompt --oauth https://example.com/mcp` skips probing and prints OAuth-specific setup: Claude
+Desktop's custom-connector flow, Codex's official `mcp add` and `mcp login` commands, and an explicit
+JetBrains limitation because its official MCP documentation does not establish a native OAuth login.
+OAuth prompt output never requests a bearer token.
+
+## OAuth installation metadata
+
+hitch stores a versioned registry at `$XDG_CONFIG_HOME/hitch/oauth-installations.json` (falling back
+to `~/.config/hitch`). It is written atomically at `0600` and contains only scope, client ID, config
+path, server name, and a sanitized URL. URL userinfo, query strings, fragments, headers, credentials,
+and tokens are never stored there. A malformed or unreadable registry is reported and never replaced.
 
 ## Install into a project instead of your home directory
 

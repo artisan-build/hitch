@@ -75,6 +75,7 @@ Planned commands: `hitch scan`, `hitch uninstall`, and prompt-tier setup flows.
 | `--args "a,b,c"` | Comma-separated stdio command arguments. Empty arguments are refused. |
 | `--env K=V` | Stdio environment variable (repeatable). Values are credentials and are never printed. |
 | `--forget` | Clear the remembered harness preference before installing. |
+| `--oauth` | Force harness-owned OAuth without probing or prompting for a token. Mutually exclusive with token, Authorization-header, and claim inputs. |
 
 ### Name inference
 
@@ -386,12 +387,46 @@ test; the redirect-handling bug shipped undetected because nothing ever ran the 
 
 ## 9. Out of scope for v1 (do not build)
 
-- OAuth / dynamic client registration flows. Bearer tokens and custom headers only.
+- Bearer-token and custom-header flows remain supported and unchanged. Harness-owned OAuth ships:
+  hitch detects a conservative RFC 9728 protected-resource signal (or accepts `--oauth`), filters to
+  clients with verified native support, writes their URL/config shape, and lets the harness perform
+  browser login, token storage, refresh, and client registration.
+- hitch itself running dynamic client registration, PKCE, callback handling, refresh-token handling,
+  or any other OAuth exchange remains v2/out of scope.
 - A server registry or catalog. hitch installs what you point it at.
 - `/.well-known/mcp.json` endpoint discovery. This is the intended v2 wedge — design the URL
   handling so it can slot in later, but do not implement it.
 - Windows support beyond correct path resolution. Build it right, don't test-matrix it.
 - Any hosted component.
+
+### OAuth installation metadata and revocation
+
+hitch records its successful OAuth config writes in a versioned registry at
+`$XDG_CONFIG_HOME/hitch/oauth-installations.json` (or `~/.config/hitch/oauth-installations.json`).
+The atomic `0600` registry stores only global/project scope, exact client ID, canonical config path,
+server name, and a sanitized server URL. Sanitization removes all userinfo, the complete query, and
+the fragment. The registry never stores headers, credentials, tokens, or derived authorization
+values. Dry runs write no metadata; partial installs record only successful targets; malformed or
+unreadable metadata is reported and never overwritten.
+
+`scan` labels an entry `OAuth (token held by harness)` only when that metadata still matches the
+actual scope, client, path, name, and sanitized configured URL, and the entry does not contain an
+Authorization header. `uninstall` removes matching metadata only after removing the config entry.
+The harness token is separate and is not removed by hitch's config edit.
+
+Official lifecycle/setup evidence used by the implementation:
+
+| Harness | OAuth setup/login | Logout/revocation guidance | Official source |
+|---|---|---|---|
+| Claude Code | Native browser flow | `claude mcp logout <name>` | https://code.claude.com/docs/en/mcp#authenticate-with-remote-mcp-servers |
+| Cursor | Native OAuth | No verified logout command; use server-side account/token management | https://cursor.com/docs/mcp |
+| Windsurf | Native OAuth | No verified logout command; use server-side account/token management | https://docs.windsurf.com/windsurf/cascade/mcp |
+| Zed | Native OAuth | No verified logout command; use server-side account/token management | https://zed.dev/docs/ai/mcp |
+| Gemini CLI | Native OAuth | No verified logout command; use server-side account/token management | https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md |
+| opencode | Native OAuth | `opencode mcp logout <name>` | https://opencode.ai/docs/mcp-servers/#authenticating |
+| Claude Desktop | Add a custom connector, then use its documented sign-in choice | Disconnect in connector/account settings | https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp |
+| Codex | `codex mcp add <name> --url <url>`, then `codex mcp login <name>` | No logout command claimed by hitch | https://developers.openai.com/codex/extend/mcp |
+| JetBrains | Remote HTTP setup is documented; native OAuth login is not established | Use the server/vendor manual account path | https://www.jetbrains.com/help/ai-assistant/mcp.html |
 
 ---
 
