@@ -141,19 +141,25 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				return err
 			}
 			oauthMode := oauthOverride
-			env, err := envFn()
-			if err != nil {
-				return err
-			}
-			canonicalClients, err := normalizeClientIDs(clients)
+			canonicalClients, err := normalizeInstallClientIDs(clients)
 			if err != nil {
 				return exitError{err: err, code: 2}
 			}
 			stdioMode := cmd.Flags().Changed("command")
-			if stdioMode {
-				if oauthMode {
-					return exitError{err: fmt.Errorf("--oauth is only valid for remote installs"), code: 2}
+			if stdioMode && oauthMode {
+				return exitError{err: fmt.Errorf("--oauth is only valid for remote installs"), code: 2}
+			}
+			definitelyNonOAuth := stdioMode || len(args) == 2 || cmd.Flags().Changed("token-stdin") || cmd.Flags().Changed("token-env") || cmd.Flags().Changed("claim") || cmd.Flags().Changed("claim-url") || hasRawHeader(headers, "Authorization")
+			if !oauthMode && definitelyNonOAuth {
+				if err := validateFileWriterClientIDs(canonicalClients); err != nil {
+					return exitError{err: err, code: 2}
 				}
+			}
+			env, err := envFn()
+			if err != nil {
+				return err
+			}
+			if stdioMode {
 				if strings.TrimSpace(command) == "" {
 					return exitError{err: fmt.Errorf("stdio install requires non-empty --command"), code: 2}
 				}
@@ -232,6 +238,11 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			explicitAuthorization := hasHeader(parsedHeaders, "Authorization")
 			if !oauthMode && !claimMode && !explicitTokenInput && !explicitAuthorization {
 				oauthMode = detectOAuth(normalizedURL)
+			}
+			if !oauthMode {
+				if err := validateFileWriterClientIDs(canonicalClients); err != nil {
+					return exitError{err: err, code: 2}
+				}
 			}
 			var resolvedToken string
 			if claimMode {
@@ -326,6 +337,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			result, err := install.InstallRemote(install.Options{
 				URL:            normalizedURL,
 				Name:           name,
+				OAuth:          oauthMode,
 				NameFromServer: nameFromServer,
 				NamePending:    namePending,
 				Headers:        parsedHeaders,
@@ -578,7 +590,21 @@ func parseHeaders(values []string) (map[string]string, error) {
 	return headers, nil
 }
 
+func normalizeInstallClientIDs(values []string) ([]string, error) {
+	// Remote target validation is deferred until after OAuth detection. Unknown
+	// targets are valid OAuth skips (with hitch prompt guidance), while the
+	// unchanged bearer/stdio paths reject them as file-writer clients below.
+	return normalizeClientIDsAgainst(values, func(string) bool { return true })
+}
+
 func normalizeClientIDs(values []string) ([]string, error) {
+	return normalizeClientIDsAgainst(values, func(id string) bool {
+		_, ok := harness.FileWriterClientByID(id)
+		return ok
+	})
+}
+
+func normalizeClientIDsAgainst(values []string, allowed func(string) bool) ([]string, error) {
 	out := make([]string, 0, len(values))
 	seen := map[string]bool{}
 	aliases := map[string]string{"claude": "claude-code", "claude-code": "claude-code", "gemini": "gemini-cli", "gemini-cli": "gemini-cli"}
@@ -587,7 +613,7 @@ func normalizeClientIDs(values []string) ([]string, error) {
 		if alias, ok := aliases[id]; ok {
 			id = alias
 		}
-		if _, ok := harness.FileWriterClientByID(id); !ok {
+		if !allowed(id) {
 			return nil, fmt.Errorf("unknown file-writer client %q", value)
 		}
 		if !seen[id] {
@@ -596,6 +622,15 @@ func normalizeClientIDs(values []string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+func validateFileWriterClientIDs(values []string) error {
+	for _, id := range values {
+		if _, ok := harness.FileWriterClientByID(id); !ok {
+			return fmt.Errorf("unknown file-writer client %q", id)
+		}
+	}
+	return nil
 }
 
 func pickTargets(url string, targets []install.Target, preferred map[string]bool) ([]install.Target, error) {

@@ -276,6 +276,118 @@ func TestInstallOAuthOverrideSkipsProbeAndTokenInputInNonTTYModes(t *testing.T) 
 	}
 }
 
+func TestInstallOAuthCarriesIntentIntoGeminiEntry(t *testing.T) {
+	home := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "--oauth", "--name", "oauth-server", "--client", "gemini-cli"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
+	if err != nil {
+		t.Fatalf("read Gemini config: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("parse Gemini config: %v", err)
+	}
+	entry := config["mcpServers"].(map[string]any)["oauth-server"].(map[string]any)
+	want := map[string]any{"httpUrl": "https://mcp.example.test/mcp", "headers": map[string]any{}, "oauth": map[string]any{"enabled": true}}
+	gotJSON, _ := json.Marshal(entry)
+	wantJSON, _ := json.Marshal(want)
+	if !bytes.Equal(gotJSON, wantJSON) {
+		t.Fatalf("Gemini OAuth entry = %s, want %s", gotJSON, wantJSON)
+	}
+}
+
+func TestInstallOAuthExplicitNonWritableClientsGivePromptGuidance(t *testing.T) {
+	for _, client := range []string{"codex", "vscode", "claude-desktop", "jetbrains", "future-client"} {
+		t.Run(client, func(t *testing.T) {
+			home := t.TempDir()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Main([]string{"install", "https://USERINFO_SENTINEL@mcp.example.test/mcp", "--oauth", "--name", "oauth-server", "--client", client}, &stdout, &stderr, func() (harness.Env, error) {
+				return testEnv(home), nil
+			})
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "hitch cannot configure OAuth for this harness") || !strings.Contains(stdout.String(), "hitch prompt") {
+				t.Fatalf("stdout missing OAuth skip guidance: %q", stdout.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), "USERINFO_SENTINEL") {
+				t.Fatalf("OAuth skip echoed URL userinfo: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), "bearer_token_env_var") || strings.Contains(stdout.String()+stderr.String(), "HITCH_TOKEN_") {
+				t.Fatalf("OAuth output contains bearer-token manual block: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestInstallOAuthMixedExplicitSelectionReportsSkipWithoutClaimingSuccess(t *testing.T) {
+	home := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "--oauth", "--name", "oauth-server", "--client", "cursor", "--client", "vscode"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want partial-success 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `Configured Cursor "oauth-server"`) || !strings.Contains(stdout.String(), "Not configured: VS Code: hitch cannot configure OAuth for this harness") {
+		t.Fatalf("stdout missing honest mixed result: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), `Configured VS Code "oauth-server"`) {
+		t.Fatalf("stdout claimed skipped VS Code was configured: %q", stdout.String())
+	}
+}
+
+func TestDefinitelyNonOAuthInvalidClientsFailBeforeEnvOrProbe(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "positional token prompt-tier", args: []string{"install", "https://mcp.example.test/mcp", "TOKEN_SENTINEL", "--client", "claude-desktop"}},
+		{name: "token stdin unknown", args: []string{"install", "https://mcp.example.test/mcp", "--token-stdin", "--client", "future-client"}},
+		{name: "token env prompt-tier", args: []string{"install", "https://mcp.example.test/mcp", "--token-env", "TOKEN_ENV_SENTINEL", "--client", "jetbrains"}},
+		{name: "claim unknown", args: []string{"install", "https://mcp.example.test/mcp", "--claim", "CLAIM_SENTINEL", "--claim-url", "https://claim.example.test", "--client", "future-client"}},
+		{name: "authorization prompt-tier", args: []string{"install", "https://mcp.example.test/mcp", "--header", "Authorization: Bearer TOKEN_SENTINEL", "--client", "claude-desktop"}},
+		{name: "stdio unknown", args: []string{"install", "local-server", "--command", "npx", "--client", "future-client"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldProbe := detectOAuth
+			t.Cleanup(func() { detectOAuth = oldProbe })
+			probeCalls := 0
+			detectOAuth = func(string) bool {
+				probeCalls++
+				return false
+			}
+			envCalls := 0
+			root := NewRootCommand(func() (harness.Env, error) {
+				envCalls++
+				return testEnv(t.TempDir()), nil
+			})
+			root.SetIn(strings.NewReader("TOKEN_STDIN_SENTINEL"))
+			root.SetOut(&bytes.Buffer{})
+			root.SetErr(&bytes.Buffer{})
+			root.SetArgs(tt.args)
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), "unknown file-writer client") {
+				t.Fatalf("Execute error = %v, want invalid client", err)
+			}
+			if envCalls != 0 || probeCalls != 0 {
+				t.Fatalf("env calls = %d, probe calls = %d; want both zero", envCalls, probeCalls)
+			}
+		})
+	}
+}
+
 func TestInstallOAuthOverrideRejectsCredentialAndClaimInputsBeforeSideEffects(t *testing.T) {
 	for _, tt := range []struct {
 		name       string

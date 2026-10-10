@@ -51,6 +51,173 @@ func TestInstallFreshFileExactEntryShapesAndMode(t *testing.T) {
 	}
 }
 
+func TestInstallOAuthFreshFileExactEntryShapes(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range oauthShapeCases(t.TempDir()) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			opts := baseOptions(testEnv(home), tt.id)
+			opts.OAuth = true
+			opts.Headers = map[string]string{}
+
+			res, err := InstallRemote(opts)
+			if err != nil {
+				t.Fatalf("InstallRemote returned error: %v", err)
+			}
+			path := expectedPath(home, tt.id)
+			if len(res.Written) != 1 || res.Written[0] != path {
+				t.Fatalf("written paths = %#v, want %q", res.Written, path)
+			}
+			data := readJSON(t, path)
+			got := data[tt.key].(map[string]any)["renamed"].(map[string]any)
+			assertJSONEqual(t, got, tt.expected)
+		})
+	}
+}
+
+func TestOAuthExplicitNonWritableTargetsAreSkippedWithPromptGuidance(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := baseOptions(testEnv(home), "codex", "vscode", "claude-desktop", "jetbrains", "future-client")
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want no writable target")
+	}
+	if len(res.Written) != 0 || len(res.WouldWrite) != 0 || len(res.Manual) != 0 {
+		t.Fatalf("result wrote or emitted bearer manual instructions: %#v", res)
+	}
+	if len(res.Failures) != 5 {
+		t.Fatalf("failures = %#v, want one per skipped target", res.Failures)
+	}
+	for _, failure := range res.Failures {
+		if !strings.Contains(failure, "hitch cannot configure OAuth for this harness") || !strings.Contains(failure, "hitch prompt") {
+			t.Fatalf("skip lacks OAuth prompt guidance: %q", failure)
+		}
+		if strings.Contains(failure, testURL) {
+			t.Fatalf("skip echoed server URL: %q", failure)
+		}
+		if strings.Contains(failure, "bearer_token_env_var") || strings.Contains(failure, "HITCH_TOKEN_") {
+			t.Fatalf("OAuth skip emitted bearer-token Codex instructions: %q", failure)
+		}
+	}
+	for id, path := range map[string]string{
+		"codex":  filepath.Join(home, ".codex", "config.toml"),
+		"vscode": expectedPath(home, "vscode"),
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("skipped %s config exists, stat err = %v", id, statErr)
+		}
+	}
+}
+
+func TestOAuthMixedExplicitSelectionWritesOnlyCapableTargets(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := baseOptions(testEnv(home), "cursor", "vscode", "jetbrains")
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want skipped-target advisory")
+	}
+	if len(res.Written) != 1 || res.Written[0] != expectedPath(home, "cursor") {
+		t.Fatalf("written = %#v, want only Cursor", res.Written)
+	}
+	if len(res.Failures) != 2 {
+		t.Fatalf("failures = %#v, want VS Code and JetBrains", res.Failures)
+	}
+	if _, statErr := os.Stat(expectedPath(home, "vscode")); !os.IsNotExist(statErr) {
+		t.Fatalf("VS Code config exists, stat err = %v", statErr)
+	}
+}
+
+func TestOAuthInteractivePickerReceivesOnlyWritableTargets(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	for _, marker := range []string{
+		filepath.Join(home, ".cursor"),
+		filepath.Join(home, ".codex"),
+		filepath.Join(home, "Library", "Application Support", "Code", "User"),
+		filepath.Join(home, "Library", "Application Support", "Claude"),
+	} {
+		if err := os.MkdirAll(marker, 0o700); err != nil {
+			t.Fatalf("mkdir marker %q: %v", marker, err)
+		}
+	}
+	opts := baseOptions(testEnv(home))
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.PickTargets = func(targets []Target, _ map[string]bool) ([]Target, error) {
+		if len(targets) != 1 || targets[0].Client.ID != "cursor" {
+			t.Fatalf("OAuth picker targets = %#v, want only Cursor", targets)
+		}
+		return targets, nil
+	}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want skipped-target advisory")
+	}
+	if len(res.Written) != 1 || len(res.Failures) != 3 {
+		t.Fatalf("result = %#v, want Cursor write and three detected skips", res)
+	}
+}
+
+func TestOAuthYesFlowWritesOnlySixWritableHarnesses(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	for _, marker := range []string{
+		filepath.Join(home, ".claude"),
+		filepath.Join(home, ".cursor"),
+		filepath.Join(home, ".codex"),
+		filepath.Join(home, ".codeium", "windsurf"),
+		filepath.Join(home, ".config", "zed"),
+		filepath.Join(home, "Library", "Application Support", "Code", "User"),
+		filepath.Join(home, ".gemini"),
+		filepath.Join(home, ".config", "opencode"),
+		filepath.Join(home, "Library", "Application Support", "Claude"),
+		filepath.Join(home, "Library", "Application Support", "JetBrains"),
+	} {
+		if err := os.MkdirAll(marker, 0o700); err != nil {
+			t.Fatalf("mkdir marker %q: %v", marker, err)
+		}
+	}
+	opts := baseOptions(testEnv(home))
+	opts.Clients = nil
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want four skipped-target advisories")
+	}
+	writtenNames := make([]string, 0, len(res.WrittenInfo))
+	for _, info := range res.WrittenInfo {
+		writtenNames = append(writtenNames, info.ClientName)
+	}
+	if got := strings.Join(writtenNames, ","); got != "Claude Code,Cursor,Windsurf,Zed,Gemini CLI,opencode" {
+		t.Fatalf("written harnesses = %q, want frozen writable set", got)
+	}
+	if len(res.Failures) != 4 {
+		t.Fatalf("failures = %#v, want Codex, VS Code, Claude Desktop, and JetBrains", res.Failures)
+	}
+	for _, path := range []string{filepath.Join(home, ".codex", "config.toml"), expectedPath(home, "vscode")} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("non-writable OAuth config %q exists, stat err = %v", path, statErr)
+		}
+	}
+}
+
 func TestInstallStdioFreshFileExactEntryShapesAndMode(t *testing.T) {
 	t.Parallel()
 
@@ -2461,6 +2628,17 @@ func shapeCases(home string) []shapeCase {
 		{id: "vscode", key: "servers", path: filepath.Join(home, "Library", "Application Support", "Code", "User", "mcp.json"), expected: map[string]any{"type": "http", "url": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
 		{id: "gemini-cli", key: "mcpServers", path: filepath.Join(home, ".gemini", "settings.json"), expected: map[string]any{"httpUrl": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
 		{id: "opencode", key: "mcp", path: filepath.Join(home, ".config", "opencode", "opencode.json"), expected: map[string]any{"type": "remote", "url": testURL, "headers": map[string]any{"Authorization": "Bearer " + testToken}}},
+	}
+}
+
+func oauthShapeCases(home string) []shapeCase {
+	return []shapeCase{
+		{id: "claude-code", key: "mcpServers", path: filepath.Join(home, ".claude.json"), expected: map[string]any{"type": "http", "url": testURL, "headers": map[string]any{}}},
+		{id: "cursor", key: "mcpServers", path: filepath.Join(home, ".cursor", "mcp.json"), expected: map[string]any{"url": testURL, "headers": map[string]any{}}},
+		{id: "windsurf", key: "mcpServers", path: filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"), expected: map[string]any{"serverUrl": testURL, "headers": map[string]any{}}},
+		{id: "zed", key: "context_servers", path: filepath.Join(home, ".config", "zed", "settings.json"), expected: map[string]any{"url": testURL, "headers": map[string]any{}}},
+		{id: "gemini-cli", key: "mcpServers", path: filepath.Join(home, ".gemini", "settings.json"), expected: map[string]any{"httpUrl": testURL, "headers": map[string]any{}, "oauth": map[string]any{"enabled": true}}},
+		{id: "opencode", key: "mcp", path: filepath.Join(home, ".config", "opencode", "opencode.json"), expected: map[string]any{"type": "remote", "url": testURL, "headers": map[string]any{}}},
 	}
 }
 
