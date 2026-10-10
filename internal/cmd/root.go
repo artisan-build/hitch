@@ -13,6 +13,7 @@ import (
 	"github.com/artisan-build/hitch/internal/claim"
 	"github.com/artisan-build/hitch/internal/harness"
 	"github.com/artisan-build/hitch/internal/install"
+	"github.com/artisan-build/hitch/internal/oauth"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -22,6 +23,9 @@ var (
 	Version = "dev"
 	Commit  = "none"
 	Date    = "unknown"
+
+	detectOAuth         = oauth.Detect
+	resolveInstallToken = resolveToken
 )
 
 func NewRootCommand(envFn func() (harness.Env, error)) *cobra.Command {
@@ -115,6 +119,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	var envVars []string
 	var claimCode string
 	var claimURL string
+	var oauthOverride bool
 
 	cmd := &cobra.Command{
 		Use:   "install <url|name> [token]",
@@ -132,6 +137,10 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateOAuthFlagUse(cmd, oauthOverride, args); err != nil {
+				return err
+			}
+			oauthMode := oauthOverride
 			env, err := envFn()
 			if err != nil {
 				return err
@@ -142,6 +151,9 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			}
 			stdioMode := cmd.Flags().Changed("command")
 			if stdioMode {
+				if oauthMode {
+					return exitError{err: fmt.Errorf("--oauth is only valid for remote installs"), code: 2}
+				}
 				if strings.TrimSpace(command) == "" {
 					return exitError{err: fmt.Errorf("stdio install requires non-empty --command"), code: 2}
 				}
@@ -216,13 +228,17 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			if err != nil {
 				return exitError{err: err, code: 2}
 			}
+			explicitTokenInput := len(args) == 2 || cmd.Flags().Changed("token-stdin") || cmd.Flags().Changed("token-env")
+			if !oauthMode && !claimMode && !explicitTokenInput {
+				oauthMode = detectOAuth(normalizedURL)
+			}
 			var resolvedToken string
 			if claimMode {
 				if _, ok := parsedHeaders["Authorization"]; ok {
 					return exitError{err: fmt.Errorf("authorization header cannot be combined with --claim; the claim exchange supplies the bearer token"), code: 2}
 				}
-			} else {
-				if resolvedToken, err = resolveToken(cmd, args, tokenStdin, tokenEnv); err != nil {
+			} else if !oauthMode {
+				if resolvedToken, err = resolveInstallToken(cmd, args, tokenStdin, tokenEnv); err != nil {
 					return err
 				}
 			}
@@ -244,6 +260,11 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			}
 			if normalizedURL, err = install.ValidateRemoteInstall(normalizedURL, parsedHeaders); err != nil {
 				return err
+			}
+			if oauthMode {
+				if _, err := fmt.Fprintln(cmd.OutOrStdout(), "This server signs you in with OAuth; your agent will open a browser the first time it connects."); err != nil {
+					return err
+				}
 			}
 			var nameFromServer bool
 			var namePending bool
@@ -349,7 +370,30 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	cmd.Flags().StringArrayVar(&envVars, "env", nil, "stdio environment variable as K=V (repeatable)")
 	cmd.Flags().StringVar(&claimCode, "claim", "", "single-use claim code to exchange for a bearer token before installing")
 	cmd.Flags().StringVar(&claimURL, "claim-url", "", "claim endpoint that redeems --claim (https required)")
+	cmd.Flags().BoolVar(&oauthOverride, "oauth", false, "install as an OAuth-authenticated server without probing or prompting for a token")
 	return cmd
+}
+
+func validateOAuthFlagUse(cmd *cobra.Command, oauthMode bool, args []string) error {
+	if !oauthMode {
+		return nil
+	}
+	conflicts := []struct {
+		active bool
+		name   string
+	}{
+		{active: len(args) == 2, name: "a positional token"},
+		{active: cmd.Flags().Changed("token-stdin"), name: "--token-stdin"},
+		{active: cmd.Flags().Changed("token-env"), name: "--token-env"},
+		{active: cmd.Flags().Changed("claim"), name: "--claim"},
+		{active: cmd.Flags().Changed("claim-url"), name: "--claim-url"},
+	}
+	for _, conflict := range conflicts {
+		if conflict.active {
+			return exitError{err: fmt.Errorf("--oauth cannot be combined with %s", conflict.name), code: 2}
+		}
+	}
+	return nil
 }
 
 func validateClaimFlagUse(claimCode string, claimURL string, args []string, tokenStdin bool, tokenEnv string) error {

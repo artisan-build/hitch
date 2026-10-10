@@ -2,18 +2,262 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artisan-build/hitch/internal/harness"
 	installpkg "github.com/artisan-build/hitch/internal/install"
+	"github.com/artisan-build/hitch/internal/oauth"
 	"github.com/charmbracelet/huh"
+	"github.com/spf13/cobra"
 )
+
+func TestInstallDetectsOAuthWithoutSendingCredentialsOrResolvingToken(t *testing.T) {
+	home := t.TempDir()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("probe Authorization = %q, want empty", got)
+		}
+		if got := r.Header.Get("X-User-Header"); got != "" {
+			t.Errorf("probe X-User-Header = %q, want empty", got)
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp", resource_metadata="https://auth.example.test/.well-known/oauth-protected-resource/mcp"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	oldResolver := resolveInstallToken
+	t.Cleanup(func() { resolveInstallToken = oldResolver })
+	resolverCalls := 0
+	resolveInstallToken = func(*cobra.Command, []string, bool, string) (string, error) {
+		resolverCalls++
+		return "TOKEN_PROMPT_SENTINEL", nil
+	}
+
+	root := NewRootCommand(func() (harness.Env, error) { return testEnv(home), nil })
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetIn(strings.NewReader("TOKEN_STDIN_SENTINEL"))
+	root.SetArgs([]string{"install", server.URL, "--name", "oauth-server", "--client", "cursor", "--header", "X-User-Header: configured"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute returned error: %v; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("probe requests = %d, want 1", requests)
+	}
+	if resolverCalls != 0 {
+		t.Fatalf("token resolver calls = %d, want 0", resolverCalls)
+	}
+	if !strings.Contains(stdout.String(), "This server signs you in with OAuth; your agent will open a browser the first time it connects.") {
+		t.Fatalf("stdout missing OAuth first-connect message: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "TOKEN_") {
+		t.Fatalf("OAuth output leaked token sentinel; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if got := cursorHeaders(t, home); len(got) != 1 || got["X-User-Header"] != "configured" {
+		t.Fatalf("written headers = %#v, want only configured user header", got)
+	}
+}
+
+func TestInstallInconclusiveOAuthProbesUseExistingTokenPath(t *testing.T) {
+	tests := []struct {
+		name  string
+		start func(*testing.T) (string, func())
+	}{
+		{
+			name: "bare 401",
+			start: func(t *testing.T) (string, func()) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+				return server.URL, server.Close
+			},
+		},
+		{
+			name: "200",
+			start: func(t *testing.T) (string, func()) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+				return server.URL, server.Close
+			},
+		},
+		{
+			name: "timeout",
+			start: func(t *testing.T) (string, func()) {
+				server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+				return server.URL, server.Close
+			},
+		},
+		{
+			name: "connection error",
+			start: func(t *testing.T) (string, func()) {
+				server := httptest.NewServer(http.NotFoundHandler())
+				url := server.URL
+				server.Close()
+				return url, func() {}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			url, closeServer := tt.start(t)
+			defer closeServer()
+
+			oldProbe := detectOAuth
+			oldResolver := resolveInstallToken
+			t.Cleanup(func() {
+				detectOAuth = oldProbe
+				resolveInstallToken = oldResolver
+			})
+			detectOAuth = func(rawURL string) bool {
+				ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+				defer cancel()
+				return oauth.Probe(ctx, http.DefaultClient, rawURL)
+			}
+			resolverCalls := 0
+			resolveInstallToken = func(*cobra.Command, []string, bool, string) (string, error) {
+				resolverCalls++
+				return "FALLBACK_TOKEN_SENTINEL", nil
+			}
+
+			root := NewRootCommand(func() (harness.Env, error) { return testEnv(home), nil })
+			root.SetOut(&bytes.Buffer{})
+			root.SetErr(&bytes.Buffer{})
+			root.SetIn(strings.NewReader(""))
+			root.SetArgs([]string{"install", url, "--name", "fallback-server", "--client", "cursor"})
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute returned error: %v", err)
+			}
+			if resolverCalls != 1 {
+				t.Fatalf("token resolver calls = %d, want 1", resolverCalls)
+			}
+			if got := cursorAuthorization(t, home); got != "Bearer FALLBACK_TOKEN_SENTINEL" {
+				t.Fatalf("Authorization = %q, want fallback token", got)
+			}
+		})
+	}
+}
+
+func TestInstallOAuthOverrideSkipsProbeAndTokenInputInNonTTYModes(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		args  []string
+		setup func(string)
+	}{
+		{name: "explicit client", args: []string{"--client", "cursor"}, setup: func(string) {}},
+		{name: "yes", args: []string{"--yes"}, setup: func(home string) { mkdirAll(t, filepath.Join(home, ".cursor")) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			tt.setup(home)
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			defer server.Close()
+
+			oldResolver := resolveInstallToken
+			t.Cleanup(func() { resolveInstallToken = oldResolver })
+			resolverCalls := 0
+			resolveInstallToken = func(*cobra.Command, []string, bool, string) (string, error) {
+				resolverCalls++
+				return "OVERRIDE_TOKEN_SENTINEL", nil
+			}
+
+			args := []string{"install", server.URL, "--oauth", "--name", "oauth-server"}
+			args = append(args, tt.args...)
+			root := NewRootCommand(func() (harness.Env, error) { return testEnv(home), nil })
+			var stdout bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&bytes.Buffer{})
+			root.SetIn(strings.NewReader("OVERRIDE_STDIN_SENTINEL"))
+			root.SetArgs(args)
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute returned error: %v", err)
+			}
+			if requests != 0 {
+				t.Fatalf("probe requests = %d, want 0", requests)
+			}
+			if resolverCalls != 0 {
+				t.Fatalf("token resolver calls = %d, want 0", resolverCalls)
+			}
+			if !strings.Contains(stdout.String(), "signs you in with OAuth") {
+				t.Fatalf("stdout missing OAuth message: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestInstallOAuthOverrideRejectsCredentialAndClaimInputsBeforeSideEffects(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		extraArgs  []string
+		want       string
+		secretLike string
+	}{
+		{name: "positional token", extraArgs: []string{"POSITIONAL_SECRET_SENTINEL"}, want: "positional token", secretLike: "POSITIONAL_SECRET_SENTINEL"},
+		{name: "token stdin", extraArgs: []string{"--token-stdin"}, want: "--token-stdin", secretLike: "STDIN_SECRET_SENTINEL"},
+		{name: "token env", extraArgs: []string{"--token-env", "SECRET_ENV_SENTINEL"}, want: "--token-env", secretLike: "SECRET_ENV_SENTINEL"},
+		{name: "claim", extraArgs: []string{"--claim", "CLAIM_SECRET_SENTINEL"}, want: "--claim", secretLike: "CLAIM_SECRET_SENTINEL"},
+		{name: "claim URL", extraArgs: []string{"--claim-url", "https://CLAIM_URL_SECRET_SENTINEL.example.test"}, want: "--claim-url", secretLike: "CLAIM_URL_SECRET_SENTINEL"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			defer server.Close()
+
+			envCalls := 0
+			root := NewRootCommand(func() (harness.Env, error) {
+				envCalls++
+				return testEnv(home), nil
+			})
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetIn(strings.NewReader("STDIN_SECRET_SENTINEL"))
+			args := []string{"install", server.URL}
+			if tt.name == "positional token" {
+				args = append(args, tt.extraArgs...)
+				args = append(args, "--oauth", "--client", "cursor")
+			} else {
+				args = append(args, "--oauth", "--client", "cursor")
+				args = append(args, tt.extraArgs...)
+			}
+			root.SetArgs(args)
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Execute error = %v, want conflict naming %q", err, tt.want)
+			}
+			if requests != 0 || envCalls != 0 {
+				t.Fatalf("requests=%d envCalls=%d, want no side effects", requests, envCalls)
+			}
+			if strings.Contains(stdout.String()+stderr.String()+err.Error(), tt.secretLike) {
+				t.Fatalf("conflict output leaked secret-like value; stdout=%q stderr=%q err=%q", stdout.String(), stderr.String(), err.Error())
+			}
+			if _, statErr := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); !os.IsNotExist(statErr) {
+				t.Fatalf("config was written, stat err = %v", statErr)
+			}
+		})
+	}
+}
 
 func TestInstallNonTTYWithoutYesOrClientExitsNonZeroAndWritesNothing(t *testing.T) {
 	home := t.TempDir()
