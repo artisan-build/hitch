@@ -25,7 +25,12 @@ func Detect(rawURL string) bool {
 // Probe reports OAuth only for a 401 Bearer challenge carrying a valid
 // resource_metadata URI. It never adds headers to the request.
 func Probe(ctx context.Context, client *http.Client, rawURL string) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, nil)
+	probeURL, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	probeURL.User = nil
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, probeURL.String(), nil)
 	if err != nil {
 		return false
 	}
