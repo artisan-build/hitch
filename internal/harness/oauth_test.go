@@ -47,3 +47,19 @@ func TestUnknownOAuthCapabilityIsNotWritable(t *testing.T) {
 		t.Fatalf("unknown capability = %#v, found = %v", capability, ok)
 	}
 }
+
+func TestOAuthLifecycleGuidanceUsesOnlyVerifiedLogoutCommands(t *testing.T) {
+	want := map[string]string{
+		"claude-code": "claude mcp logout example",
+		"opencode":    "opencode mcp logout example",
+	}
+	for _, client := range []string{"claude-code", "cursor", "windsurf", "zed", "gemini-cli", "opencode"} {
+		guidance := OAuthLifecycleGuidanceByClientID(client, "example")
+		if guidance.LogoutCommand != want[client] {
+			t.Fatalf("%s logout command = %q, want %q", client, guidance.LogoutCommand, want[client])
+		}
+		if guidance.SourceURL == "" {
+			t.Fatalf("%s lifecycle source is empty", client)
+		}
+	}
+}

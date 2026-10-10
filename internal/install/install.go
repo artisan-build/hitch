@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/artisan-build/hitch/internal/harness"
+	"github.com/artisan-build/hitch/internal/oauthregistry"
 	"github.com/pelletier/go-toml/v2/unstable"
 )
 
@@ -24,6 +25,11 @@ const codexTokenPrefix = "HITCH_TOKEN_"
 // ErrPartialFailure marks target-specific install failures. Callers may treat
 // it as partial success only when at least one target was written or validated.
 var ErrPartialFailure = errors.New("some harnesses were not configured")
+
+var (
+	upsertOAuthRegistry           = oauthregistry.Upsert
+	removeOAuthRegistryIdentities = oauthregistry.RemoveIdentities
+)
 
 // ClaimPendingAuthorization stands in for the Authorization header during
 // --dry-run --claim, where no exchange happens and no token exists. It must
@@ -60,8 +66,18 @@ type ScanResult struct {
 	Path            string
 	Status          ScanStatus
 	HoldsCredential bool
+	Auth            AuthClassification
+	OAuthServerURL  string
 	Detail          string
 }
+
+type AuthClassification string
+
+const (
+	AuthNoCredential AuthClassification = "no_credential"
+	AuthCredential   AuthClassification = "credential"
+	AuthOAuth        AuthClassification = "oauth"
+)
 
 type UninstallOptions struct {
 	Name        string
@@ -127,6 +143,7 @@ type Options struct {
 type Result struct {
 	Name        string
 	URL         string
+	OAuth       bool
 	Written     []string
 	WrittenInfo []WriteInfo
 	WouldWrite  []string
@@ -136,6 +153,7 @@ type Result struct {
 }
 
 type WriteInfo struct {
+	ClientID   string
 	ClientName string
 	Path       string
 }
@@ -220,6 +238,10 @@ func ScanScoped(env harness.Env, name string, clientIDs []string, project bool) 
 	if err != nil {
 		return nil, err
 	}
+	registryRecords, err := oauthregistry.Load(env)
+	if err != nil {
+		return nil, err
+	}
 	out := []ScanResult{}
 	for _, detected := range results {
 		adapter, ok := AdapterByClientID(detected.ID)
@@ -239,7 +261,7 @@ func ScanScoped(env harness.Env, name string, clientIDs []string, project bool) 
 		if len(selected) > 0 && !selected[detected.ID] {
 			continue
 		}
-		out = append(out, scanOne(detected, adapter, name))
+		out = append(out, scanOne(detected, adapter, name, project, registryRecords))
 	}
 	if len(selected) > 0 && len(out) != len(selected) {
 		for id := range selected {
@@ -326,8 +348,8 @@ func scanCodexName(client harness.DetectionResult, name string) ScanResult {
 	return result
 }
 
-func scanOne(client harness.DetectionResult, adapter Adapter, name string) ScanResult {
-	result := ScanResult{Client: client, Path: client.ConfigPath, Status: ScanNoEntry}
+func scanOne(client harness.DetectionResult, adapter Adapter, name string, project bool, registryRecords []oauthregistry.Record) ScanResult {
+	result := ScanResult{Client: client, Path: client.ConfigPath, Status: ScanNoEntry, Auth: AuthNoCredential}
 	raw, existed, err := readExisting(client.ConfigPath)
 	if err != nil {
 		result.Status = ScanUnreadable
@@ -383,6 +405,21 @@ func scanOne(client harness.DetectionResult, adapter Adapter, name string) ScanR
 		}
 		result.Status = ScanHasEntry
 		result.HoldsCredential = holdsCredential(servers)
+		if result.HoldsCredential {
+			result.Auth = AuthCredential
+		}
+		allOAuth := true
+		for serverName, entry := range servers {
+			sanitizedURL, matches := matchingOAuthRecord(client, adapter, serverName, entry, project, registryRecords)
+			if !matches {
+				allOAuth = false
+				break
+			}
+			result.OAuthServerURL = sanitizedURL
+		}
+		if allOAuth {
+			result.Auth = AuthOAuth
+		}
 		return result
 	}
 	entry, ok := servers[name]
@@ -391,7 +428,77 @@ func scanOne(client harness.DetectionResult, adapter Adapter, name string) ScanR
 	}
 	result.Status = ScanHasEntry
 	result.HoldsCredential = holdsCredential(entry)
+	if result.HoldsCredential {
+		result.Auth = AuthCredential
+	}
+	if sanitizedURL, matches := matchingOAuthRecord(client, adapter, name, entry, project, registryRecords); matches {
+		result.Auth = AuthOAuth
+		result.OAuthServerURL = sanitizedURL
+	}
 	return result
+}
+
+func matchingOAuthRecord(client harness.DetectionResult, adapter Adapter, name string, entry any, project bool, registryRecords []oauthregistry.Record) (string, bool) {
+	if hasAuthorizationHeader(entry) {
+		return "", false
+	}
+	configuredURL, ok := remoteEntryURL(adapter.ClientID, entry)
+	if !ok {
+		return "", false
+	}
+	sanitizedURL, err := oauthregistry.SanitizeURL(configuredURL)
+	if err != nil {
+		return "", false
+	}
+	scope := oauthregistry.ScopeGlobal
+	if project {
+		scope = oauthregistry.ScopeProject
+	}
+	candidate := oauthregistry.Record{Scope: scope, ClientID: client.ID, ConfigPath: registryIdentityPath(client.ConfigPath), ServerName: name, ServerURL: sanitizedURL}
+	return sanitizedURL, oauthregistry.Matches(registryRecords, candidate)
+}
+
+func remoteEntryURL(clientID string, entry any) (string, bool) {
+	object, ok := entry.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	key := "url"
+	switch clientID {
+	case "windsurf":
+		key = "serverUrl"
+	case "gemini-cli":
+		key = "httpUrl"
+	}
+	value, ok := object[key].(string)
+	return value, ok && value != ""
+}
+
+func hasAuthorizationHeader(entry any) bool {
+	object, ok := entry.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, containerKey := range []string{"headers", "http_headers"} {
+		headers, ok := object[containerKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		for key := range headers {
+			if strings.EqualFold(key, "Authorization") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func registryIdentityPath(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved
+	}
+	return path
 }
 
 func Uninstall(opts UninstallOptions) (UninstallResult, error) {
@@ -470,6 +577,17 @@ func Uninstall(opts UninstallOptions) (UninstallResult, error) {
 			res.NotPresent = append(res.NotPresent, target)
 		}
 	}
+	removedIdentities := make([]oauthregistry.Identity, 0, len(res.Removed))
+	for _, removed := range res.Removed {
+		scope := oauthregistry.ScopeGlobal
+		if opts.Project {
+			scope = oauthregistry.ScopeProject
+		}
+		removedIdentities = append(removedIdentities, oauthregistry.Identity{Scope: scope, ClientID: removed.Client.ID, ConfigPath: registryIdentityPath(removed.Path), ServerName: name})
+	}
+	if err := removeOAuthRegistryIdentities(opts.Env, removedIdentities); err != nil {
+		return res, fmt.Errorf("config entry removed but OAuth registry cleanup failed: %w", err)
+	}
 	if len(res.Unreadable) > 0 {
 		return res, fmt.Errorf("could not verify %d config file(s)", len(res.Unreadable))
 	}
@@ -493,12 +611,12 @@ func InferName(rawURL string) (string, bool, error) {
 	}
 	host = strings.Trim(strings.ToLower(host), "[] .")
 	if host == "" {
-		return "", false, fmt.Errorf("invalid URL %q: missing host", rawURL)
+		return "", false, fmt.Errorf("invalid URL: missing host")
 	}
 	host = strings.TrimPrefix(host, "mcp.")
 	label := strings.Split(host, ".")[0]
 	if label == "" {
-		return "", false, fmt.Errorf("could not infer a server name from %q", rawURL)
+		return "", false, fmt.Errorf("could not infer a server name from URL; rerun with --name")
 	}
 	return sanitizeName(label), genericNames[label], nil
 }
@@ -516,7 +634,7 @@ func ResolveName(rawURL string, explicit string, yes bool, confirm func(string) 
 		return "", err
 	}
 	if name == "" {
-		return "", fmt.Errorf("could not infer a usable server name from %q", rawURL)
+		return "", fmt.Errorf("could not infer a usable server name from URL; rerun with --name")
 	}
 	if !ambiguous {
 		return name, nil
@@ -580,7 +698,7 @@ func InstallRemote(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	res := Result{Name: name, URL: opts.URL, CodexEnvVar: CodexTokenEnvVar(name)}
+	res := Result{Name: name, URL: opts.URL, OAuth: opts.OAuth, CodexEnvVar: CodexTokenEnvVar(name)}
 	for _, client := range skipped {
 		res.Failures = append(res.Failures, oauthSkipMessage(client))
 	}
@@ -637,7 +755,14 @@ func InstallRemote(opts Options) (Result, error) {
 			}
 			res.WouldWrite = append(res.WouldWrite, writePath)
 			if opts.Stdout != nil {
-				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, writePath, MaskedJSON(entry))
+				preview := entry
+				if opts.OAuth {
+					preview, err = sanitizedOAuthPreview(entry, target.Client.ID)
+					if err != nil {
+						return res, err
+					}
+				}
+				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, writePath, MaskedJSON(preview))
 			}
 			continue
 		}
@@ -646,7 +771,29 @@ func InstallRemote(opts Options) (Result, error) {
 			continue
 		}
 		res.Written = append(res.Written, writePath)
-		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: writePath})
+		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientID: target.Client.ID, ClientName: target.Client.Name, Path: writePath})
+	}
+	if opts.OAuth && !opts.DryRun && len(res.WrittenInfo) > 0 {
+		sanitizedURL, sanitizeErr := oauthregistry.SanitizeURL(opts.URL)
+		if sanitizeErr != nil {
+			return res, sanitizeErr
+		}
+		scope := oauthregistry.ScopeGlobal
+		if opts.Project {
+			scope = oauthregistry.ScopeProject
+		}
+		records := make([]oauthregistry.Record, 0, len(res.WrittenInfo))
+		for _, written := range res.WrittenInfo {
+			records = append(records, oauthregistry.Record{Scope: scope, ClientID: written.ClientID, ConfigPath: registryIdentityPath(written.Path), ServerName: name, ServerURL: sanitizedURL})
+		}
+		if registryErr := upsertOAuthRegistry(opts.Env, records); registryErr != nil {
+			return res, fmt.Errorf("harness config was written but OAuth installation metadata could not be persisted: %w", registryErr)
+		}
+	}
+	if !opts.OAuth && !opts.DryRun {
+		if registryErr := removeSupersededOAuthRecords(opts.Env, opts.Project, name, res.WrittenInfo); registryErr != nil {
+			return res, fmt.Errorf("harness config was written but superseded OAuth installation metadata could not be removed: %w", registryErr)
+		}
 	}
 	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == capabilitySkipCount && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
@@ -724,7 +871,12 @@ func InstallStdio(opts Options) (Result, error) {
 			continue
 		}
 		res.Written = append(res.Written, writePath)
-		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: writePath})
+		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientID: target.Client.ID, ClientName: target.Client.Name, Path: writePath})
+	}
+	if !opts.DryRun {
+		if registryErr := removeSupersededOAuthRecords(opts.Env, opts.Project, name, res.WrittenInfo); registryErr != nil {
+			return res, fmt.Errorf("harness config was written but superseded OAuth installation metadata could not be removed: %w", registryErr)
+		}
 	}
 	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
@@ -739,6 +891,26 @@ func InstallStdio(opts Options) (Result, error) {
 		return res, fmt.Errorf("%w: %s", ErrPartialFailure, strings.Join(res.Failures, "; "))
 	}
 	return res, nil
+}
+
+func removeSupersededOAuthRecords(env harness.Env, project bool, name string, written []WriteInfo) error {
+	if len(written) == 0 {
+		return nil
+	}
+	scope := oauthregistry.ScopeGlobal
+	if project {
+		scope = oauthregistry.ScopeProject
+	}
+	identities := make([]oauthregistry.Identity, 0, len(written))
+	for _, target := range written {
+		identities = append(identities, oauthregistry.Identity{
+			Scope:      scope,
+			ClientID:   target.ClientID,
+			ConfigPath: registryIdentityPath(target.Path),
+			ServerName: name,
+		})
+	}
+	return removeOAuthRegistryIdentities(env, identities)
 }
 
 func ValidateRemoteInstall(rawURL string, headers map[string]string) (string, error) {
@@ -758,6 +930,42 @@ func ValidateRemoteInstall(rawURL string, headers map[string]string) (string, er
 func NormalizeRemoteURL(rawURL string) (string, error) {
 	normalizedURL, _, err := normalizeRemoteURL(rawURL)
 	return normalizedURL, err
+}
+
+func SanitizeOAuthURL(rawURL string) (string, error) {
+	normalized, err := ValidateRemoteInstall(rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+	return oauthregistry.SanitizeURL(normalized)
+}
+
+// ValidateOAuthPromptURL applies the credential-bearing transport policy and
+// rejects URL components that cannot safely be repeated in copyable OAuth
+// setup instructions. The returned URL is operationally unchanged.
+func ValidateOAuthPromptURL(rawURL string) (string, error) {
+	normalized, err := ValidateRemoteInstall(rawURL, map[string]string{"Authorization": "OAuth credential"})
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return "", fmt.Errorf("OAuth setup URL is invalid")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("OAuth manual setup cannot print a URL containing userinfo; use an endpoint URL without embedded credentials")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", fmt.Errorf("OAuth manual setup cannot safely print a URL containing a query; use an endpoint URL without query parameters")
+	}
+	if parsed.Fragment != "" || parsed.RawFragment != "" {
+		return "", fmt.Errorf("OAuth manual setup cannot safely print a URL containing a fragment; use an endpoint URL without a fragment")
+	}
+	return normalized, nil
+}
+
+func OAuthOrigin(rawURL string) (string, error) {
+	return oauthregistry.Origin(rawURL)
 }
 
 func normalizeRemoteURL(rawURL string) (string, *url.URL, error) {
@@ -2292,6 +2500,28 @@ func MaskedJSON(entry map[string]any) string {
 		return "{}"
 	}
 	return string(out)
+}
+
+func sanitizedOAuthPreview(entry map[string]any, clientID string) (map[string]any, error) {
+	preview := make(map[string]any, len(entry))
+	for key, value := range entry {
+		preview[key] = value
+	}
+	key := "url"
+	switch clientID {
+	case "windsurf":
+		key = "serverUrl"
+	case "gemini-cli":
+		key = "httpUrl"
+	}
+	if operational, ok := preview[key].(string); ok {
+		sanitized, err := SanitizeOAuthURL(operational)
+		if err != nil {
+			return nil, err
+		}
+		preview[key] = sanitized
+	}
+	return preview, nil
 }
 
 func maskValue(v any) any {
