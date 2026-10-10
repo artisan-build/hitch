@@ -3,11 +3,14 @@ package cmd
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/huh"
 
 	"github.com/artisan-build/hitch/internal/harness"
 	"github.com/artisan-build/hitch/internal/install"
@@ -47,6 +50,7 @@ func TestPromptOAuthRefusesSensitiveURLComponentsWithoutEchoingThem(t *testing.T
 		"https://USERINFO_SENTINEL@example.test/mcp",
 		"https://example.test/mcp?QUERY_SENTINEL=yes",
 		"https://example.test/mcp#FRAGMENT_SENTINEL",
+		"https://USERINFO_SENTINEL@./mcp?QUERY_SENTINEL=yes#FRAGMENT_SENTINEL",
 	} {
 		var stdout, stderr bytes.Buffer
 		code := Main([]string{"prompt", rawURL, "--oauth"}, &stdout, &stderr, func() (harness.Env, error) { return harness.Env{}, nil })
@@ -60,6 +64,52 @@ func TestPromptOAuthRefusesSensitiveURLComponentsWithoutEchoingThem(t *testing.T
 			if strings.Contains(stdout.String()+stderr.String(), secret) {
 				t.Fatalf("refusal leaked %s: stdout=%q stderr=%q", secret, stdout.String(), stderr.String())
 			}
+		}
+	}
+}
+
+func TestOAuthInstallPickerAndNameErrorsDoNotEchoSensitiveURLComponents(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".cursor"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldTerminal := installInputIsTerminal
+	oldPicker := runInstallPicker
+	installInputIsTerminal = func(io.Reader) bool { return true }
+	runInstallPicker = func(url string, _ []huh.Option[string], selected *[]string) error {
+		if want := "https://example.test/mcp"; url != want {
+			t.Fatalf("picker URL = %q, want %q", url, want)
+		}
+		*selected = nil
+		return nil
+	}
+	t.Cleanup(func() {
+		installInputIsTerminal = oldTerminal
+		runInstallPicker = oldPicker
+	})
+
+	rawURL := "https://USERINFO_SENTINEL@example.test/mcp?QUERY_SENTINEL=yes#FRAGMENT_SENTINEL"
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"install", rawURL, "--oauth", "--name", "example"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+	if code != 0 {
+		t.Fatalf("picker install code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, secret := range []string{"USERINFO_SENTINEL", "QUERY_SENTINEL", "FRAGMENT_SENTINEL"} {
+		if strings.Contains(stdout.String()+stderr.String(), secret) {
+			t.Fatalf("picker output leaked %s: stdout=%q stderr=%q", secret, stdout.String(), stderr.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	rawURL = "https://USERINFO_SENTINEL@./mcp?QUERY_SENTINEL=yes#FRAGMENT_SENTINEL"
+	code = Main([]string{"install", rawURL, "--oauth", "--client", "cursor"}, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+	if code == 0 {
+		t.Fatalf("install accepted unusable host: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	for _, secret := range []string{"USERINFO_SENTINEL", "QUERY_SENTINEL", "FRAGMENT_SENTINEL"} {
+		if strings.Contains(stdout.String()+stderr.String(), secret) {
+			t.Fatalf("name error leaked %s: stdout=%q stderr=%q", secret, stdout.String(), stderr.String())
 		}
 	}
 }

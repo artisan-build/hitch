@@ -341,7 +341,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				Project:        project,
 				DryRun:         dryRun,
 				Forget:         forget,
-				NonTTY:         !isTerminal(cmd.InOrStdin()),
+				NonTTY:         !installInputIsTerminal(cmd.InOrStdin()),
 				ConfirmName: func(inferred string) (bool, error) {
 					var ok bool
 					form := huh.NewForm(huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Use inferred server name %q?", inferred)).Value(&ok)))
@@ -642,6 +642,8 @@ var runInstallPicker = func(url string, options []huh.Option[string], selected *
 	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title(fmt.Sprintf("Install %q into which harnesses?", url)).Options(options...).Value(selected)))
 	return form.Run()
 }
+
+var installInputIsTerminal = isTerminal
 
 func confirmProjectCredentialWrite(path string) (bool, error) {
 	return runProjectCredentialConfirm(path)
