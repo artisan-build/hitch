@@ -346,6 +346,31 @@ func TestInstallOAuthMixedExplicitSelectionReportsSkipWithoutClaimingSuccess(t *
 	}
 }
 
+func TestInstallProjectOAuthMixedDryRunKeepsCursorAndSkipsWindsurf(t *testing.T) {
+	project := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", "https://mcp.example.test/mcp", "--oauth", "--name", "oauth-server", "--project", "--dry-run", "--client", "cursor", "--client", "windsurf"}, &stdout, &stderr, func() (harness.Env, error) {
+		return projectEnv(project), nil
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want partial-success 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	wantPath := filepath.Join(project, ".cursor", "mcp.json")
+	if !strings.Contains(stdout.String(), "Would write Cursor to "+wantPath) || !strings.Contains(stdout.String(), "Dry run: would update "+wantPath) {
+		t.Fatalf("stdout missing Cursor dry-run result: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Not configured: Windsurf: hitch cannot configure OAuth for this harness") || !strings.Contains(stdout.String(), "hitch prompt") {
+		t.Fatalf("stdout missing Windsurf skip guidance: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "has no project config path") {
+		t.Fatalf("mixed project OAuth retained fatal no-path error: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if _, statErr := os.Stat(wantPath); !os.IsNotExist(statErr) {
+		t.Fatalf("dry run wrote Cursor config, stat err = %v", statErr)
+	}
+}
+
 func TestDefinitelyNonOAuthInvalidClientsFailBeforeEnvOrProbe(t *testing.T) {
 	tests := []struct {
 		name string

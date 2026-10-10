@@ -580,6 +580,7 @@ func InstallRemote(opts Options) (Result, error) {
 	for _, client := range skipped {
 		res.Failures = append(res.Failures, oauthSkipMessage(client))
 	}
+	capabilitySkipCount := len(res.Failures)
 	codexManual := func() string {
 		if opts.NamePending {
 			return "Codex: manual instructions omitted from this dry run; the server name is not yet known (pass --name, or it will come from the claim response or URL inference)."
@@ -643,7 +644,7 @@ func InstallRemote(opts Options) (Result, error) {
 		res.Written = append(res.Written, writePath)
 		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: writePath})
 	}
-	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
+	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == capabilitySkipCount && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
 		for _, target := range targets {
 			ids = append(ids, target.Client.ID)
@@ -975,10 +976,12 @@ func resolveProjectOAuthTargets(opts Options) ([]Target, []harness.DetectionResu
 		if pathErr != nil {
 			return nil, nil, false, pathErr
 		}
-		if ok {
-			result.ConfigPath = path
-			detected = append(detected, Target{Client: result, Path: path})
+		if !ok {
+			skipped = append(skipped, result)
+			continue
 		}
+		result.ConfigPath = path
+		detected = append(detected, Target{Client: result, Path: path})
 	}
 	if len(opts.Clients) > 0 {
 		targets := make([]Target, 0, len(opts.Clients))
@@ -997,7 +1000,8 @@ func resolveProjectOAuthTargets(opts Options) ([]Target, []harness.DetectionResu
 				return nil, nil, false, pathErr
 			}
 			if !hasProjectPath {
-				return nil, nil, false, fmt.Errorf("client %q has no project config path", id)
+				skipped = append(skipped, result)
+				continue
 			}
 			result.ConfigPath = path
 			targets = append(targets, Target{Client: result, Path: path})

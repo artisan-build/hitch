@@ -1987,6 +1987,146 @@ func TestProjectInstallRemoteUsesProjectPaths(t *testing.T) {
 	}
 }
 
+func TestProjectOAuthYesWritesFiveTargetsAndReportsFiveSkips(t *testing.T) {
+	project := initGitRepo(t)
+	env := projectEnv(project)
+	for _, id := range []string{"claude-code", "cursor", "codex", "windsurf", "zed", "vscode", "gemini-cli", "opencode", "claude-desktop", "jetbrains"} {
+		makeMarker(t, env.Home, id)
+	}
+	opts := baseOptions(env)
+	opts.Clients = nil
+	opts.Project = true
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want capability skip advisories")
+	}
+	writtenNames := make([]string, 0, len(res.WrittenInfo))
+	for _, info := range res.WrittenInfo {
+		writtenNames = append(writtenNames, info.ClientName)
+	}
+	if got := strings.Join(writtenNames, ","); got != "Claude Code,Cursor,Zed,Gemini CLI,opencode" {
+		t.Fatalf("project OAuth writes = %q, want five project-writable clients", got)
+	}
+	if len(res.Failures) != 5 {
+		t.Fatalf("failures = %#v, want five project-incapable skips", res.Failures)
+	}
+	for _, name := range []string{"Codex", "Windsurf", "VS Code", "Claude Desktop", "JetBrains"} {
+		assertOAuthSkip(t, res.Failures, name)
+	}
+}
+
+func TestProjectOAuthExplicitCursorAndWindsurfDryRunPartiallySucceeds(t *testing.T) {
+	project := initGitRepo(t)
+	opts := baseOptions(projectEnv(project), "cursor", "windsurf")
+	opts.Project = true
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.DryRun = true
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want Windsurf skip advisory")
+	}
+	wantPath := filepath.Join(project, ".cursor", "mcp.json")
+	if len(res.WouldWrite) != 1 || res.WouldWrite[0] != wantPath {
+		t.Fatalf("would write = %#v, want Cursor project path %q", res.WouldWrite, wantPath)
+	}
+	if len(res.Failures) != 1 {
+		t.Fatalf("failures = %#v, want only Windsurf skip", res.Failures)
+	}
+	assertOAuthSkip(t, res.Failures, "Windsurf")
+	if _, statErr := os.Stat(wantPath); !os.IsNotExist(statErr) {
+		t.Fatalf("dry run wrote Cursor config, stat err = %v", statErr)
+	}
+}
+
+func TestProjectOAuthInteractivePickerExcludesWindsurfAndReportsSkip(t *testing.T) {
+	project := initGitRepo(t)
+	env := projectEnv(project)
+	makeMarker(t, env.Home, "cursor")
+	makeMarker(t, env.Home, "windsurf")
+	opts := baseOptions(env)
+	opts.Clients = nil
+	opts.Project = true
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.PickTargets = func(targets []Target, preferred map[string]bool) ([]Target, error) {
+		if preferred != nil {
+			t.Fatalf("project picker preferred = %#v, want nil", preferred)
+		}
+		if len(targets) != 1 || targets[0].Client.ID != "cursor" {
+			t.Fatalf("project OAuth picker targets = %#v, want only Cursor", targets)
+		}
+		return targets, nil
+	}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want Windsurf skip advisory")
+	}
+	if len(res.Written) != 1 || res.Written[0] != filepath.Join(project, ".cursor", "mcp.json") {
+		t.Fatalf("written = %#v, want Cursor project config", res.Written)
+	}
+	if len(res.Failures) != 1 {
+		t.Fatalf("failures = %#v, want only Windsurf skip", res.Failures)
+	}
+	assertOAuthSkip(t, res.Failures, "Windsurf")
+}
+
+func TestInteractiveOAuthCapabilitySkipStillSavesSuccessfulSelection(t *testing.T) {
+	home := t.TempDir()
+	makeMarker(t, home, "cursor")
+	makeMarker(t, home, "codex")
+	opts := baseOptions(testEnv(home))
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.PickTargets = func(targets []Target, _ map[string]bool) ([]Target, error) { return targets, nil }
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want Codex skip advisory")
+	}
+	if len(res.Written) != 1 || len(res.Failures) != 1 {
+		t.Fatalf("result = %#v, want Cursor write and Codex skip", res)
+	}
+	preferred, loadErr := LoadPreferences(testEnv(home))
+	if loadErr != nil {
+		t.Fatalf("LoadPreferences returned error: %v", loadErr)
+	}
+	if len(preferred) != 1 || !preferred["cursor"] {
+		t.Fatalf("saved preference = %#v, want Cursor only", preferred)
+	}
+}
+
+func TestInteractiveOAuthWriteFailureWithCapabilitySkipDoesNotSavePreferences(t *testing.T) {
+	home := t.TempDir()
+	makeMarker(t, home, "cursor")
+	makeMarker(t, home, "codex")
+	writeFile(t, expectedPath(home, "zed"), "{not-json", 0o600)
+	opts := baseOptions(testEnv(home))
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.PickTargets = func(targets []Target, _ map[string]bool) ([]Target, error) { return targets, nil }
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want skip and write failure")
+	}
+	if len(res.Written) != 1 || len(res.Failures) != 2 {
+		t.Fatalf("result = %#v, want Cursor write, Codex skip, and Zed failure", res)
+	}
+	prefs := filepath.Join(home, ".config", "hitch", "preferences.json")
+	if _, statErr := os.Stat(prefs); !os.IsNotExist(statErr) {
+		t.Fatalf("failed interactive install saved preferences, stat err = %v", statErr)
+	}
+}
+
 func TestProjectInstallStdioUsesProjectPaths(t *testing.T) {
 	t.Parallel()
 
@@ -2668,12 +2808,34 @@ func expectedPath(home string, id string) string {
 func makeMarker(t *testing.T, home string, id string) {
 	t.Helper()
 	markers := map[string]string{
-		"cursor":     filepath.Join(home, ".cursor"),
-		"gemini-cli": filepath.Join(home, ".gemini"),
+		"claude-code":    filepath.Join(home, ".claude"),
+		"cursor":         filepath.Join(home, ".cursor"),
+		"codex":          filepath.Join(home, ".codex"),
+		"windsurf":       filepath.Join(home, ".codeium", "windsurf"),
+		"zed":            filepath.Join(home, ".config", "zed"),
+		"vscode":         filepath.Join(home, "Library", "Application Support", "Code", "User"),
+		"gemini-cli":     filepath.Join(home, ".gemini"),
+		"opencode":       filepath.Join(home, ".config", "opencode"),
+		"claude-desktop": filepath.Join(home, "Library", "Application Support", "Claude"),
+		"jetbrains":      filepath.Join(home, "Library", "Application Support", "JetBrains"),
 	}
-	if err := os.MkdirAll(markers[id], 0o700); err != nil {
+	path, ok := markers[id]
+	if !ok {
+		t.Fatalf("unknown marker client %q", id)
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatalf("mkdir marker: %v", err)
 	}
+}
+
+func assertOAuthSkip(t *testing.T, failures []string, clientName string) {
+	t.Helper()
+	for _, failure := range failures {
+		if strings.HasPrefix(failure, clientName+":") && strings.Contains(failure, "hitch cannot configure OAuth for this harness") && strings.Contains(failure, "hitch prompt") {
+			return
+		}
+	}
+	t.Fatalf("failures = %#v, want OAuth skip guidance for %s", failures, clientName)
 }
 
 func testEnv(home string) harness.Env {

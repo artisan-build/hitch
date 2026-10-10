@@ -24,7 +24,7 @@ func OAuthCapabilities() []OAuthCapability {
 		{ClientID: "vscode", NativeSupport: OAuthUnknown, HitchCanConfigure: false, SourceURL: "https://code.visualstudio.com/docs/agents/reference/mcp-configuration"},
 		{ClientID: "gemini-cli", NativeSupport: OAuthSupported, HitchCanConfigure: true, SourceURL: "https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md"},
 		{ClientID: "opencode", NativeSupport: OAuthSupported, HitchCanConfigure: true, SourceURL: "https://opencode.ai/docs/mcp-servers/"},
-		{ClientID: "claude-desktop", NativeSupport: OAuthSupported, HitchCanConfigure: false, SourceURL: "https://support.anthropic.com/en/articles/11503834-building-custom-integrations-via-remote-mcp-servers"},
+		{ClientID: "claude-desktop", NativeSupport: OAuthSupported, HitchCanConfigure: false, SourceURL: "https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp"},
 		{ClientID: "jetbrains", NativeSupport: OAuthUnknown, HitchCanConfigure: false, SourceURL: "https://www.jetbrains.com/help/ai-assistant/mcp.html"},
 	}
 }
