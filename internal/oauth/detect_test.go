@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -78,6 +79,29 @@ func TestProbeDoesNotFollowRedirects(t *testing.T) {
 	}
 	if destinationRequests != 0 {
 		t.Fatalf("destination requests = %d, want 0", destinationRequests)
+	}
+}
+
+func TestProbeStripsURLUserinfoBeforeSendingRequest(t *testing.T) {
+	var authorization string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="https://auth.example.test/metadata"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	probeURL, err := url.Parse(server.URL + "/mcp")
+	if err != nil {
+		t.Fatalf("parse TLS server URL: %v", err)
+	}
+	probeURL.User = url.UserPassword("u", "p")
+
+	if !Probe(context.Background(), server.Client(), probeURL.String()) {
+		t.Fatal("Probe() = false, want OAuth classification after stripping URL userinfo")
+	}
+	if authorization != "" {
+		t.Fatalf("probe sent Authorization header derived from URL userinfo: %q", authorization)
 	}
 }
 
