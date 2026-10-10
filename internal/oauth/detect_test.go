@@ -32,6 +32,12 @@ func TestProbeClassifiesOnlyUnauthorizedBearerResourceMetadata(t *testing.T) {
 				if got := r.Header.Get("Authorization"); got != "" {
 					t.Errorf("Authorization = %q, want empty", got)
 				}
+				if got := r.Header.Get("Accept"); got != mcpAccept {
+					t.Errorf("Accept = %q, want %q", got, mcpAccept)
+				}
+				if got := r.Header.Get("Content-Type"); got != "" {
+					t.Errorf("Content-Type = %q, want empty", got)
+				}
 				if tt.header != "" {
 					w.Header().Set("WWW-Authenticate", tt.header)
 				}
@@ -43,6 +49,35 @@ func TestProbeClassifiesOnlyUnauthorizedBearerResourceMetadata(t *testing.T) {
 				t.Fatalf("Probe() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestProbeDoesNotFollowRedirects(t *testing.T) {
+	destinationRequests := 0
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		destinationRequests++
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="https://auth.example.test/metadata"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer destination.Close()
+
+	sourceRequests := 0
+	sourceMethods := []string{}
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceRequests++
+		sourceMethods = append(sourceMethods, r.Method)
+		http.Redirect(w, r, destination.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	if Probe(context.Background(), source.Client(), source.URL) {
+		t.Fatal("Probe() = true after redirect, want false")
+	}
+	if sourceRequests != 1 || len(sourceMethods) != 1 || sourceMethods[0] != http.MethodPost {
+		t.Fatalf("source requests = %d methods = %#v, want one POST", sourceRequests, sourceMethods)
+	}
+	if destinationRequests != 0 {
+		t.Fatalf("destination requests = %d, want 0", destinationRequests)
 	}
 }
 

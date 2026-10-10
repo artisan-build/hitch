@@ -26,6 +26,13 @@ func TestInstallDetectsOAuthWithoutSendingCredentialsOrResolvingToken(t *testing
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
+		if got := r.Header.Get("Accept"); got != "application/json, text/event-stream" {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		if got := r.Header.Get("Content-Type"); got != "" {
+			t.Errorf("probe Content-Type = %q, want empty", got)
+		}
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Errorf("probe Authorization = %q, want empty", got)
 		}
@@ -69,6 +76,74 @@ func TestInstallDetectsOAuthWithoutSendingCredentialsOrResolvingToken(t *testing
 	}
 	if got := cursorHeaders(t, home); len(got) != 1 || got["X-User-Header"] != "configured" {
 		t.Fatalf("written headers = %#v, want only configured user header", got)
+	}
+}
+
+func TestInstallAuthorizationHeaderSkipsOAuthDetection(t *testing.T) {
+	home := t.TempDir()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="https://auth.example.test/metadata"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	oldResolver := resolveInstallToken
+	t.Cleanup(func() { resolveInstallToken = oldResolver })
+	resolverCalls := 0
+	resolveInstallToken = func(*cobra.Command, []string, bool, string) (string, error) {
+		resolverCalls++
+		return "", nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", server.URL, "--name", "bearer-header", "--client", "cursor", "--header", "authorization: Bearer HEADER_SENTINEL"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 0 {
+		t.Fatalf("probe requests = %d, want 0", requests)
+	}
+	if resolverCalls != 1 {
+		t.Fatalf("token resolver calls = %d, want existing path once", resolverCalls)
+	}
+	if strings.Contains(stdout.String(), "signs you in with OAuth") {
+		t.Fatalf("stdout falsely reported OAuth: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "HEADER_SENTINEL") {
+		t.Fatalf("output leaked Authorization value; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if got := cursorHeaders(t, home); len(got) != 1 || got["authorization"] != "Bearer HEADER_SENTINEL" {
+		t.Fatalf("written headers = %#v, want exact lowercase Authorization header", got)
+	}
+}
+
+func TestInstallPositionalTokenSkipsOAuthProbe(t *testing.T) {
+	home := t.TempDir()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Main([]string{"install", server.URL, "POSITIONAL_TOKEN_SENTINEL", "--name", "bearer-server", "--client", "cursor"}, &stdout, &stderr, func() (harness.Env, error) {
+		return testEnv(home), nil
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if requests != 0 {
+		t.Fatalf("probe requests = %d, want 0", requests)
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "POSITIONAL_TOKEN_SENTINEL") {
+		t.Fatalf("output leaked token; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 
@@ -213,6 +288,8 @@ func TestInstallOAuthOverrideRejectsCredentialAndClaimInputsBeforeSideEffects(t 
 		{name: "token env", extraArgs: []string{"--token-env", "SECRET_ENV_SENTINEL"}, want: "--token-env", secretLike: "SECRET_ENV_SENTINEL"},
 		{name: "claim", extraArgs: []string{"--claim", "CLAIM_SECRET_SENTINEL"}, want: "--claim", secretLike: "CLAIM_SECRET_SENTINEL"},
 		{name: "claim URL", extraArgs: []string{"--claim-url", "https://CLAIM_URL_SECRET_SENTINEL.example.test"}, want: "--claim-url", secretLike: "CLAIM_URL_SECRET_SENTINEL"},
+		{name: "Authorization header", extraArgs: []string{"--header", "Authorization: Bearer AUTH_HEADER_SECRET_SENTINEL"}, want: "Authorization header", secretLike: "AUTH_HEADER_SECRET_SENTINEL"},
+		{name: "lowercase authorization header", extraArgs: []string{"--header", "authorization: Bearer LOWER_AUTH_HEADER_SECRET_SENTINEL"}, want: "Authorization header", secretLike: "LOWER_AUTH_HEADER_SECRET_SENTINEL"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -254,6 +331,64 @@ func TestInstallOAuthOverrideRejectsCredentialAndClaimInputsBeforeSideEffects(t 
 			}
 			if _, statErr := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); !os.IsNotExist(statErr) {
 				t.Fatalf("config was written, stat err = %v", statErr)
+			}
+		})
+	}
+}
+
+func TestInstallOAuthRefusesPublicHTTPAndAllowsLocalhost(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		url           string
+		explicitOAuth bool
+		wantCode      int
+		wantProbe     int
+	}{
+		{name: "explicit OAuth public HTTP", url: "http://oauth.example.test/mcp", explicitOAuth: true, wantCode: 1},
+		{name: "detected OAuth public HTTP", url: "http://oauth.example.test/mcp", wantCode: 1, wantProbe: 1},
+		{name: "localhost OAuth", url: "http://localhost:8080/mcp", explicitOAuth: true, wantCode: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			oldProbe := detectOAuth
+			t.Cleanup(func() { detectOAuth = oldProbe })
+			probeCalls := 0
+			detectOAuth = func(string) bool {
+				probeCalls++
+				return true
+			}
+
+			args := []string{"install", tt.url, "--name", "oauth-http", "--client", "cursor"}
+			if tt.explicitOAuth {
+				args = append(args, "--oauth")
+			}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Main(args, &stdout, &stderr, func() (harness.Env, error) { return testEnv(home), nil })
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if probeCalls != tt.wantProbe {
+				t.Fatalf("probe calls = %d, want %d", probeCalls, tt.wantProbe)
+			}
+			path := filepath.Join(home, ".cursor", "mcp.json")
+			if tt.wantCode != 0 {
+				if !strings.Contains(stderr.String(), "refusing to send credentials over insecure http URL") {
+					t.Fatalf("stderr missing plaintext refusal: %q", stderr.String())
+				}
+				if strings.Contains(stdout.String(), "signs you in with OAuth") || strings.Contains(stdout.String(), "Configured") {
+					t.Fatalf("refusal claimed success: %q", stdout.String())
+				}
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("public HTTP OAuth wrote config, stat err = %v", err)
+				}
+				return
+			}
+			if !strings.Contains(stdout.String(), "signs you in with OAuth") {
+				t.Fatalf("localhost OAuth missing message: %q", stdout.String())
+			}
+			if got := onlyCursorServer(t, home)["url"]; got != tt.url {
+				t.Fatalf("localhost URL = %q, want %q", got, tt.url)
 			}
 		})
 	}

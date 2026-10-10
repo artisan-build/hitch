@@ -10,6 +10,8 @@ import (
 
 const probeTimeout = 2 * time.Second
 
+const mcpAccept = "application/json, text/event-stream"
+
 // Detect probes an MCP endpoint without credentials. Probe failures are
 // deliberately indistinguishable from a non-OAuth response so installation can
 // fall back to the existing bearer-token path.
@@ -27,7 +29,16 @@ func Probe(ctx context.Context, client *http.Client, rawURL string) bool {
 	if err != nil {
 		return false
 	}
-	resp, err := client.Do(req)
+	req.Header.Set("Accept", mcpAccept)
+	probeClient := &http.Client{
+		Transport: client.Transport,
+		Jar:       client.Jar,
+		Timeout:   client.Timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := probeClient.Do(req)
 	if err != nil {
 		return false
 	}

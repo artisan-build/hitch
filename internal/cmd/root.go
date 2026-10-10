@@ -137,7 +137,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateOAuthFlagUse(cmd, oauthOverride, args); err != nil {
+			if err := validateOAuthFlagUse(cmd, oauthOverride, args, headers); err != nil {
 				return err
 			}
 			oauthMode := oauthOverride
@@ -229,12 +229,13 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				return exitError{err: err, code: 2}
 			}
 			explicitTokenInput := len(args) == 2 || cmd.Flags().Changed("token-stdin") || cmd.Flags().Changed("token-env")
-			if !oauthMode && !claimMode && !explicitTokenInput {
+			explicitAuthorization := hasHeader(parsedHeaders, "Authorization")
+			if !oauthMode && !claimMode && !explicitTokenInput && !explicitAuthorization {
 				oauthMode = detectOAuth(normalizedURL)
 			}
 			var resolvedToken string
 			if claimMode {
-				if _, ok := parsedHeaders["Authorization"]; ok {
+				if explicitAuthorization {
 					return exitError{err: fmt.Errorf("authorization header cannot be combined with --claim; the claim exchange supplies the bearer token"), code: 2}
 				}
 			} else if !oauthMode {
@@ -243,7 +244,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				}
 			}
 			if resolvedToken != "" {
-				if _, ok := parsedHeaders["Authorization"]; ok {
+				if explicitAuthorization {
 					return exitError{err: fmt.Errorf("authorization header cannot be combined with bearer token input"), code: 2}
 				}
 				parsedHeaders["Authorization"] = "Bearer " + resolvedToken
@@ -260,6 +261,13 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			}
 			if normalizedURL, err = install.ValidateRemoteInstall(normalizedURL, parsedHeaders); err != nil {
 				return err
+			}
+			if oauthMode {
+				// Reuse the credential transport gate without adding anything to
+				// the headers that will be written to harness config.
+				if _, err := install.ValidateRemoteInstall(normalizedURL, map[string]string{"Authorization": "OAuth credential"}); err != nil {
+					return err
+				}
 			}
 			if oauthMode {
 				if _, err := fmt.Fprintln(cmd.OutOrStdout(), "This server signs you in with OAuth; your agent will open a browser the first time it connects."); err != nil {
@@ -374,7 +382,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 	return cmd
 }
 
-func validateOAuthFlagUse(cmd *cobra.Command, oauthMode bool, args []string) error {
+func validateOAuthFlagUse(cmd *cobra.Command, oauthMode bool, args []string, headers []string) error {
 	if !oauthMode {
 		return nil
 	}
@@ -387,6 +395,7 @@ func validateOAuthFlagUse(cmd *cobra.Command, oauthMode bool, args []string) err
 		{active: cmd.Flags().Changed("token-env"), name: "--token-env"},
 		{active: cmd.Flags().Changed("claim"), name: "--claim"},
 		{active: cmd.Flags().Changed("claim-url"), name: "--claim-url"},
+		{active: hasRawHeader(headers, "Authorization"), name: "an Authorization header"},
 	}
 	for _, conflict := range conflicts {
 		if conflict.active {
@@ -394,6 +403,25 @@ func validateOAuthFlagUse(cmd *cobra.Command, oauthMode bool, args []string) err
 		}
 	}
 	return nil
+}
+
+func hasRawHeader(values []string, name string) bool {
+	for _, value := range values {
+		key, _, ok := strings.Cut(value, ":")
+		if ok && strings.EqualFold(strings.TrimSpace(key), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasHeader(headers map[string]string, name string) bool {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateClaimFlagUse(claimCode string, claimURL string, args []string, tokenStdin bool, tokenEnv string) error {
