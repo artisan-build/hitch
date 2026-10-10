@@ -21,6 +21,10 @@ import (
 
 const codexTokenPrefix = "HITCH_TOKEN_"
 
+// ErrPartialFailure marks target-specific install failures. Callers may treat
+// it as partial success only when at least one target was written or validated.
+var ErrPartialFailure = errors.New("some harnesses were not configured")
+
 // ClaimPendingAuthorization stands in for the Authorization header during
 // --dry-run --claim, where no exchange happens and no token exists. It must
 // never read like a value, and masking leaves it visible so the preview says
@@ -92,6 +96,9 @@ func ValidateLookupName(name string) (string, error) {
 type Options struct {
 	URL  string
 	Name string
+	// OAuth means the harness, rather than hitch, owns authentication for this
+	// remote server. It affects target capability filtering and entry shape only.
+	OAuth bool
 	// NameFromServer marks Name as the claim response's suggestion rather than
 	// the user's choice. A server-chosen name may not overwrite an existing
 	// entry: the user overwrites entries, servers do not.
@@ -535,6 +542,14 @@ func InstallRemote(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if opts.OAuth {
+		// OAuth credentials are acquired later by the harness, but the remote is
+		// still credential-bearing and must obey the same transport policy.
+		normalizedURL, err = ValidateRemoteInstall(normalizedURL, map[string]string{"Authorization": "OAuth credential"})
+		if err != nil {
+			return Result{}, err
+		}
+	}
 	opts.URL = normalizedURL
 	if opts.Name == "" {
 		name, ambiguous, err := InferName(opts.URL)
@@ -554,23 +569,37 @@ func InstallRemote(opts Options) (Result, error) {
 			return Result{}, err
 		}
 	}
-	targets, interactive, err := resolveTargets(opts)
+	var targets []Target
+	var skipped []harness.DetectionResult
+	var interactive bool
+	if opts.OAuth {
+		targets, skipped, interactive, err = resolveOAuthTargets(opts)
+	} else {
+		targets, interactive, err = resolveTargets(opts)
+	}
 	if err != nil {
 		return Result{}, err
 	}
 	res := Result{Name: name, URL: opts.URL, CodexEnvVar: CodexTokenEnvVar(name)}
+	for _, client := range skipped {
+		res.Failures = append(res.Failures, oauthSkipMessage(client))
+	}
+	capabilitySkipCount := len(res.Failures)
 	codexManual := func() string {
 		if opts.NamePending {
 			return "Codex: manual instructions omitted from this dry run; the server name is not yet known (pass --name, or it will come from the claim response or URL inference)."
 		}
 		return codexManualInstructions(name, opts.URL, res.CodexEnvVar)
 	}
-	if len(opts.Clients) == 0 {
+	if !opts.OAuth && len(opts.Clients) == 0 {
 		if codexDetected(opts.Env) {
 			res.Manual = append(res.Manual, codexManual())
 		}
 	}
 	if len(targets) == 0 {
+		if len(res.Failures) > 0 {
+			return res, fmt.Errorf("no OAuth-capable harnesses could be configured: %s", strings.Join(res.Failures, "; "))
+		}
 		return res, fmt.Errorf("no detected file-writer harnesses selected")
 	}
 	for _, target := range targets {
@@ -585,6 +614,9 @@ func InstallRemote(opts Options) (Result, error) {
 			continue
 		}
 		entry := adapter.BuildRemoteEntry(opts.URL, opts.Headers, res.CodexEnvVar)
+		if opts.OAuth && target.Client.ID == "gemini-cli" {
+			entry["oauth"] = map[string]any{"enabled": true}
+		}
 		writePath, err := resolvedWritePath(target.Path)
 		if err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", target.Client.Name, err))
@@ -616,7 +648,7 @@ func InstallRemote(opts Options) (Result, error) {
 		res.Written = append(res.Written, writePath)
 		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: writePath})
 	}
-	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
+	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == capabilitySkipCount && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
 		for _, target := range targets {
 			ids = append(ids, target.Client.ID)
@@ -626,7 +658,7 @@ func InstallRemote(opts Options) (Result, error) {
 		}
 	}
 	if len(res.Failures) > 0 {
-		return res, fmt.Errorf("some harnesses were not configured: %s", strings.Join(res.Failures, "; "))
+		return res, fmt.Errorf("%w: %s", ErrPartialFailure, strings.Join(res.Failures, "; "))
 	}
 	return res, nil
 }
@@ -704,7 +736,7 @@ func InstallStdio(opts Options) (Result, error) {
 		}
 	}
 	if len(res.Failures) > 0 {
-		return res, fmt.Errorf("some harnesses were not configured: %s", strings.Join(res.Failures, "; "))
+		return res, fmt.Errorf("%w: %s", ErrPartialFailure, strings.Join(res.Failures, "; "))
 	}
 	return res, nil
 }
@@ -865,6 +897,140 @@ func resolveTargets(opts Options) ([]Target, bool, error) {
 	}
 	chosen, err := opts.PickTargets(detected, preferred)
 	return chosen, true, err
+}
+
+func resolveOAuthTargets(opts Options) ([]Target, []harness.DetectionResult, bool, error) {
+	if opts.Project {
+		return resolveProjectOAuthTargets(opts)
+	}
+	results, err := harness.Detect(opts.Env)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	byID := make(map[string]harness.DetectionResult, len(results))
+	detected := []Target{}
+	skipped := []harness.DetectionResult{}
+	for _, result := range results {
+		byID[result.ID] = result
+		if !result.Detected {
+			continue
+		}
+		if harness.CanConfigureOAuth(result.ID) {
+			detected = append(detected, Target{Client: result, Path: result.ConfigPath})
+		} else {
+			skipped = append(skipped, result)
+		}
+	}
+	if len(opts.Clients) > 0 {
+		targets := make([]Target, 0, len(opts.Clients))
+		skipped = skipped[:0]
+		for _, id := range opts.Clients {
+			result, ok := byID[id]
+			if !ok {
+				result = harness.DetectionResult{ID: id, Name: id}
+			}
+			if !harness.CanConfigureOAuth(id) {
+				skipped = append(skipped, result)
+				continue
+			}
+			targets = append(targets, Target{Client: result, Path: result.ConfigPath})
+		}
+		return targets, skipped, false, nil
+	}
+	if opts.Yes {
+		return detected, skipped, false, nil
+	}
+	if opts.NonTTY {
+		return nil, nil, false, fmt.Errorf("non-TTY install requires either -y/--yes or -c/--client")
+	}
+	preferred, err := LoadPreferences(opts.Env)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if opts.PickTargets == nil {
+		return nil, nil, false, fmt.Errorf("interactive picker is unavailable")
+	}
+	chosen, err := opts.PickTargets(detected, preferred)
+	return chosen, skipped, true, err
+}
+
+func resolveProjectOAuthTargets(opts Options) ([]Target, []harness.DetectionResult, bool, error) {
+	root, err := projectRoot(opts.Env)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	opts.Env.WorkDir = root
+	globalResults, err := harness.Detect(opts.Env)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	byID := make(map[string]harness.DetectionResult, len(globalResults))
+	detected := []Target{}
+	skipped := []harness.DetectionResult{}
+	for _, result := range globalResults {
+		byID[result.ID] = result
+		if !result.Detected {
+			continue
+		}
+		if !harness.CanConfigureOAuth(result.ID) {
+			skipped = append(skipped, result)
+			continue
+		}
+		path, ok, pathErr := harness.ProjectConfigPath(result.ID, opts.Env)
+		if pathErr != nil {
+			return nil, nil, false, pathErr
+		}
+		if !ok {
+			skipped = append(skipped, result)
+			continue
+		}
+		result.ConfigPath = path
+		detected = append(detected, Target{Client: result, Path: path})
+	}
+	if len(opts.Clients) > 0 {
+		targets := make([]Target, 0, len(opts.Clients))
+		skipped = skipped[:0]
+		for _, id := range opts.Clients {
+			result, ok := byID[id]
+			if !ok {
+				result = harness.DetectionResult{ID: id, Name: id}
+			}
+			if !harness.CanConfigureOAuth(id) {
+				skipped = append(skipped, result)
+				continue
+			}
+			path, hasProjectPath, pathErr := harness.ProjectConfigPath(id, opts.Env)
+			if pathErr != nil {
+				return nil, nil, false, pathErr
+			}
+			if !hasProjectPath {
+				skipped = append(skipped, result)
+				continue
+			}
+			result.ConfigPath = path
+			targets = append(targets, Target{Client: result, Path: path})
+		}
+		return targets, skipped, false, nil
+	}
+	if opts.Yes {
+		return detected, skipped, false, nil
+	}
+	if opts.NonTTY {
+		return nil, nil, false, fmt.Errorf("non-TTY install requires either -y/--yes or -c/--client")
+	}
+	if opts.PickTargets == nil {
+		return nil, nil, false, fmt.Errorf("interactive picker is unavailable")
+	}
+	chosen, err := opts.PickTargets(detected, nil)
+	return chosen, skipped, true, err
+}
+
+func oauthSkipMessage(client harness.DetectionResult) string {
+	name := client.Name
+	if name == "" {
+		name = client.ID
+	}
+	return fmt.Sprintf("%s: hitch cannot configure OAuth for this harness; run hitch prompt for manual setup", name)
 }
 
 func resolveProjectTargets(opts Options) ([]Target, bool, error) {

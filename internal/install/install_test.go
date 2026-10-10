@@ -3,6 +3,7 @@ package install
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +49,173 @@ func TestInstallFreshFileExactEntryShapesAndMode(t *testing.T) {
 			got := data[tt.key].(map[string]any)["renamed"].(map[string]any)
 			assertJSONEqual(t, got, tt.expected)
 		})
+	}
+}
+
+func TestInstallOAuthFreshFileExactEntryShapes(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range oauthShapeCases(t.TempDir()) {
+		tt := tt
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			opts := baseOptions(testEnv(home), tt.id)
+			opts.OAuth = true
+			opts.Headers = map[string]string{}
+
+			res, err := InstallRemote(opts)
+			if err != nil {
+				t.Fatalf("InstallRemote returned error: %v", err)
+			}
+			path := expectedPath(home, tt.id)
+			if len(res.Written) != 1 || res.Written[0] != path {
+				t.Fatalf("written paths = %#v, want %q", res.Written, path)
+			}
+			data := readJSON(t, path)
+			got := data[tt.key].(map[string]any)["renamed"].(map[string]any)
+			assertJSONEqual(t, got, tt.expected)
+		})
+	}
+}
+
+func TestOAuthExplicitNonWritableTargetsAreSkippedWithPromptGuidance(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := baseOptions(testEnv(home), "codex", "vscode", "claude-desktop", "jetbrains", "future-client")
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want no writable target")
+	}
+	if len(res.Written) != 0 || len(res.WouldWrite) != 0 || len(res.Manual) != 0 {
+		t.Fatalf("result wrote or emitted bearer manual instructions: %#v", res)
+	}
+	if len(res.Failures) != 5 {
+		t.Fatalf("failures = %#v, want one per skipped target", res.Failures)
+	}
+	for _, failure := range res.Failures {
+		if !strings.Contains(failure, "hitch cannot configure OAuth for this harness") || !strings.Contains(failure, "hitch prompt") {
+			t.Fatalf("skip lacks OAuth prompt guidance: %q", failure)
+		}
+		if strings.Contains(failure, testURL) {
+			t.Fatalf("skip echoed server URL: %q", failure)
+		}
+		if strings.Contains(failure, "bearer_token_env_var") || strings.Contains(failure, "HITCH_TOKEN_") {
+			t.Fatalf("OAuth skip emitted bearer-token Codex instructions: %q", failure)
+		}
+	}
+	for id, path := range map[string]string{
+		"codex":  filepath.Join(home, ".codex", "config.toml"),
+		"vscode": expectedPath(home, "vscode"),
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("skipped %s config exists, stat err = %v", id, statErr)
+		}
+	}
+}
+
+func TestOAuthMixedExplicitSelectionWritesOnlyCapableTargets(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	opts := baseOptions(testEnv(home), "cursor", "vscode", "jetbrains")
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want skipped-target advisory")
+	}
+	if len(res.Written) != 1 || res.Written[0] != expectedPath(home, "cursor") {
+		t.Fatalf("written = %#v, want only Cursor", res.Written)
+	}
+	if len(res.Failures) != 2 {
+		t.Fatalf("failures = %#v, want VS Code and JetBrains", res.Failures)
+	}
+	if _, statErr := os.Stat(expectedPath(home, "vscode")); !os.IsNotExist(statErr) {
+		t.Fatalf("VS Code config exists, stat err = %v", statErr)
+	}
+}
+
+func TestOAuthInteractivePickerReceivesOnlyWritableTargets(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	for _, marker := range []string{
+		filepath.Join(home, ".cursor"),
+		filepath.Join(home, ".codex"),
+		filepath.Join(home, "Library", "Application Support", "Code", "User"),
+		filepath.Join(home, "Library", "Application Support", "Claude"),
+	} {
+		if err := os.MkdirAll(marker, 0o700); err != nil {
+			t.Fatalf("mkdir marker %q: %v", marker, err)
+		}
+	}
+	opts := baseOptions(testEnv(home))
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.PickTargets = func(targets []Target, _ map[string]bool) ([]Target, error) {
+		if len(targets) != 1 || targets[0].Client.ID != "cursor" {
+			t.Fatalf("OAuth picker targets = %#v, want only Cursor", targets)
+		}
+		return targets, nil
+	}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want skipped-target advisory")
+	}
+	if len(res.Written) != 1 || len(res.Failures) != 3 {
+		t.Fatalf("result = %#v, want Cursor write and three detected skips", res)
+	}
+}
+
+func TestOAuthYesFlowWritesOnlySixWritableHarnesses(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	for _, marker := range []string{
+		filepath.Join(home, ".claude"),
+		filepath.Join(home, ".cursor"),
+		filepath.Join(home, ".codex"),
+		filepath.Join(home, ".codeium", "windsurf"),
+		filepath.Join(home, ".config", "zed"),
+		filepath.Join(home, "Library", "Application Support", "Code", "User"),
+		filepath.Join(home, ".gemini"),
+		filepath.Join(home, ".config", "opencode"),
+		filepath.Join(home, "Library", "Application Support", "Claude"),
+		filepath.Join(home, "Library", "Application Support", "JetBrains"),
+	} {
+		if err := os.MkdirAll(marker, 0o700); err != nil {
+			t.Fatalf("mkdir marker %q: %v", marker, err)
+		}
+	}
+	opts := baseOptions(testEnv(home))
+	opts.Clients = nil
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want four skipped-target advisories")
+	}
+	writtenNames := make([]string, 0, len(res.WrittenInfo))
+	for _, info := range res.WrittenInfo {
+		writtenNames = append(writtenNames, info.ClientName)
+	}
+	if got := strings.Join(writtenNames, ","); got != "Claude Code,Cursor,Windsurf,Zed,Gemini CLI,opencode" {
+		t.Fatalf("written harnesses = %q, want frozen writable set", got)
+	}
+	if len(res.Failures) != 4 {
+		t.Fatalf("failures = %#v, want Codex, VS Code, Claude Desktop, and JetBrains", res.Failures)
+	}
+	for _, path := range []string{filepath.Join(home, ".codex", "config.toml"), expectedPath(home, "vscode")} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("non-writable OAuth config %q exists, stat err = %v", path, statErr)
+		}
 	}
 }
 
@@ -693,6 +861,9 @@ func TestInteractiveSavePreferencesFailureIsReturned(t *testing.T) {
 	res, err := InstallRemote(opts)
 	if err == nil {
 		t.Fatalf("InstallRemote returned nil error, want SavePreferences failure")
+	}
+	if errors.Is(err, ErrPartialFailure) {
+		t.Fatalf("SavePreferences error was misclassified as partial harness failure: %v", err)
 	}
 	if len(res.Written) != 1 {
 		t.Fatalf("written = %#v, want cursor write before preference failure", res.Written)
@@ -1820,6 +1991,146 @@ func TestProjectInstallRemoteUsesProjectPaths(t *testing.T) {
 	}
 }
 
+func TestProjectOAuthYesWritesFiveTargetsAndReportsFiveSkips(t *testing.T) {
+	project := initGitRepo(t)
+	env := projectEnv(project)
+	for _, id := range []string{"claude-code", "cursor", "codex", "windsurf", "zed", "vscode", "gemini-cli", "opencode", "claude-desktop", "jetbrains"} {
+		makeMarker(t, env.Home, id)
+	}
+	opts := baseOptions(env)
+	opts.Clients = nil
+	opts.Project = true
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want capability skip advisories")
+	}
+	writtenNames := make([]string, 0, len(res.WrittenInfo))
+	for _, info := range res.WrittenInfo {
+		writtenNames = append(writtenNames, info.ClientName)
+	}
+	if got := strings.Join(writtenNames, ","); got != "Claude Code,Cursor,Zed,Gemini CLI,opencode" {
+		t.Fatalf("project OAuth writes = %q, want five project-writable clients", got)
+	}
+	if len(res.Failures) != 5 {
+		t.Fatalf("failures = %#v, want five project-incapable skips", res.Failures)
+	}
+	for _, name := range []string{"Codex", "Windsurf", "VS Code", "Claude Desktop", "JetBrains"} {
+		assertOAuthSkip(t, res.Failures, name)
+	}
+}
+
+func TestProjectOAuthExplicitCursorAndWindsurfDryRunPartiallySucceeds(t *testing.T) {
+	project := initGitRepo(t)
+	opts := baseOptions(projectEnv(project), "cursor", "windsurf")
+	opts.Project = true
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.DryRun = true
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want Windsurf skip advisory")
+	}
+	wantPath := filepath.Join(project, ".cursor", "mcp.json")
+	if len(res.WouldWrite) != 1 || res.WouldWrite[0] != wantPath {
+		t.Fatalf("would write = %#v, want Cursor project path %q", res.WouldWrite, wantPath)
+	}
+	if len(res.Failures) != 1 {
+		t.Fatalf("failures = %#v, want only Windsurf skip", res.Failures)
+	}
+	assertOAuthSkip(t, res.Failures, "Windsurf")
+	if _, statErr := os.Stat(wantPath); !os.IsNotExist(statErr) {
+		t.Fatalf("dry run wrote Cursor config, stat err = %v", statErr)
+	}
+}
+
+func TestProjectOAuthInteractivePickerExcludesWindsurfAndReportsSkip(t *testing.T) {
+	project := initGitRepo(t)
+	env := projectEnv(project)
+	makeMarker(t, env.Home, "cursor")
+	makeMarker(t, env.Home, "windsurf")
+	opts := baseOptions(env)
+	opts.Clients = nil
+	opts.Project = true
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.PickTargets = func(targets []Target, preferred map[string]bool) ([]Target, error) {
+		if preferred != nil {
+			t.Fatalf("project picker preferred = %#v, want nil", preferred)
+		}
+		if len(targets) != 1 || targets[0].Client.ID != "cursor" {
+			t.Fatalf("project OAuth picker targets = %#v, want only Cursor", targets)
+		}
+		return targets, nil
+	}
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want Windsurf skip advisory")
+	}
+	if len(res.Written) != 1 || res.Written[0] != filepath.Join(project, ".cursor", "mcp.json") {
+		t.Fatalf("written = %#v, want Cursor project config", res.Written)
+	}
+	if len(res.Failures) != 1 {
+		t.Fatalf("failures = %#v, want only Windsurf skip", res.Failures)
+	}
+	assertOAuthSkip(t, res.Failures, "Windsurf")
+}
+
+func TestInteractiveOAuthCapabilitySkipStillSavesSuccessfulSelection(t *testing.T) {
+	home := t.TempDir()
+	makeMarker(t, home, "cursor")
+	makeMarker(t, home, "codex")
+	opts := baseOptions(testEnv(home))
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.PickTargets = func(targets []Target, _ map[string]bool) ([]Target, error) { return targets, nil }
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want Codex skip advisory")
+	}
+	if len(res.Written) != 1 || len(res.Failures) != 1 {
+		t.Fatalf("result = %#v, want Cursor write and Codex skip", res)
+	}
+	preferred, loadErr := LoadPreferences(testEnv(home))
+	if loadErr != nil {
+		t.Fatalf("LoadPreferences returned error: %v", loadErr)
+	}
+	if len(preferred) != 1 || !preferred["cursor"] {
+		t.Fatalf("saved preference = %#v, want Cursor only", preferred)
+	}
+}
+
+func TestInteractiveOAuthWriteFailureWithCapabilitySkipDoesNotSavePreferences(t *testing.T) {
+	home := t.TempDir()
+	makeMarker(t, home, "cursor")
+	makeMarker(t, home, "codex")
+	writeFile(t, expectedPath(home, "zed"), "{not-json", 0o600)
+	opts := baseOptions(testEnv(home))
+	opts.Clients = nil
+	opts.Yes = false
+	opts.NonTTY = false
+	opts.OAuth = true
+	opts.Headers = map[string]string{}
+	opts.PickTargets = func(targets []Target, _ map[string]bool) ([]Target, error) { return targets, nil }
+	res, err := InstallRemote(opts)
+	if err == nil {
+		t.Fatalf("InstallRemote returned nil error, want skip and write failure")
+	}
+	if len(res.Written) != 1 || len(res.Failures) != 2 {
+		t.Fatalf("result = %#v, want Cursor write, Codex skip, and Zed failure", res)
+	}
+	prefs := filepath.Join(home, ".config", "hitch", "preferences.json")
+	if _, statErr := os.Stat(prefs); !os.IsNotExist(statErr) {
+		t.Fatalf("failed interactive install saved preferences, stat err = %v", statErr)
+	}
+}
+
 func TestProjectInstallStdioUsesProjectPaths(t *testing.T) {
 	t.Parallel()
 
@@ -2464,6 +2775,17 @@ func shapeCases(home string) []shapeCase {
 	}
 }
 
+func oauthShapeCases(home string) []shapeCase {
+	return []shapeCase{
+		{id: "claude-code", key: "mcpServers", path: filepath.Join(home, ".claude.json"), expected: map[string]any{"type": "http", "url": testURL, "headers": map[string]any{}}},
+		{id: "cursor", key: "mcpServers", path: filepath.Join(home, ".cursor", "mcp.json"), expected: map[string]any{"url": testURL, "headers": map[string]any{}}},
+		{id: "windsurf", key: "mcpServers", path: filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"), expected: map[string]any{"serverUrl": testURL, "headers": map[string]any{}}},
+		{id: "zed", key: "context_servers", path: filepath.Join(home, ".config", "zed", "settings.json"), expected: map[string]any{"url": testURL, "headers": map[string]any{}}},
+		{id: "gemini-cli", key: "mcpServers", path: filepath.Join(home, ".gemini", "settings.json"), expected: map[string]any{"httpUrl": testURL, "headers": map[string]any{}, "oauth": map[string]any{"enabled": true}}},
+		{id: "opencode", key: "mcp", path: filepath.Join(home, ".config", "opencode", "opencode.json"), expected: map[string]any{"type": "remote", "url": testURL, "headers": map[string]any{}}},
+	}
+}
+
 func stdioShapeCases(home string) []shapeCase {
 	commandArgsEnv := map[string]any{"command": "npx", "args": []any{"-y", "@example/mcp", "arg,with,commas", ""}, "env": map[string]any{"API_KEY": "stdio-secret-value"}}
 	commandArgsEnvWithType := map[string]any{"type": "stdio", "command": "npx", "args": []any{"-y", "@example/mcp", "arg,with,commas", ""}, "env": map[string]any{"API_KEY": "stdio-secret-value"}}
@@ -2490,12 +2812,34 @@ func expectedPath(home string, id string) string {
 func makeMarker(t *testing.T, home string, id string) {
 	t.Helper()
 	markers := map[string]string{
-		"cursor":     filepath.Join(home, ".cursor"),
-		"gemini-cli": filepath.Join(home, ".gemini"),
+		"claude-code":    filepath.Join(home, ".claude"),
+		"cursor":         filepath.Join(home, ".cursor"),
+		"codex":          filepath.Join(home, ".codex"),
+		"windsurf":       filepath.Join(home, ".codeium", "windsurf"),
+		"zed":            filepath.Join(home, ".config", "zed"),
+		"vscode":         filepath.Join(home, "Library", "Application Support", "Code", "User"),
+		"gemini-cli":     filepath.Join(home, ".gemini"),
+		"opencode":       filepath.Join(home, ".config", "opencode"),
+		"claude-desktop": filepath.Join(home, "Library", "Application Support", "Claude"),
+		"jetbrains":      filepath.Join(home, "Library", "Application Support", "JetBrains"),
 	}
-	if err := os.MkdirAll(markers[id], 0o700); err != nil {
+	path, ok := markers[id]
+	if !ok {
+		t.Fatalf("unknown marker client %q", id)
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatalf("mkdir marker: %v", err)
 	}
+}
+
+func assertOAuthSkip(t *testing.T, failures []string, clientName string) {
+	t.Helper()
+	for _, failure := range failures {
+		if strings.HasPrefix(failure, clientName+":") && strings.Contains(failure, "hitch cannot configure OAuth for this harness") && strings.Contains(failure, "hitch prompt") {
+			return
+		}
+	}
+	t.Fatalf("failures = %#v, want OAuth skip guidance for %s", failures, clientName)
 }
 
 func testEnv(home string) harness.Env {
