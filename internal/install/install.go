@@ -27,8 +27,8 @@ const codexTokenPrefix = "HITCH_TOKEN_"
 var ErrPartialFailure = errors.New("some harnesses were not configured")
 
 var (
-	upsertOAuthRegistry = oauthregistry.Upsert
-	removeOAuthRegistry = oauthregistry.Remove
+	upsertOAuthRegistry           = oauthregistry.Upsert
+	removeOAuthRegistryIdentities = oauthregistry.RemoveIdentities
 )
 
 // ClaimPendingAuthorization stands in for the Authorization header during
@@ -483,10 +483,9 @@ func hasAuthorizationHeader(entry any) bool {
 		if !ok {
 			continue
 		}
-		for key, value := range headers {
+		for key := range headers {
 			if strings.EqualFold(key, "Authorization") {
-				text, _ := value.(string)
-				return text != ""
+				return true
 			}
 		}
 	}
@@ -577,18 +576,15 @@ func Uninstall(opts UninstallOptions) (UninstallResult, error) {
 			res.NotPresent = append(res.NotPresent, target)
 		}
 	}
-	removedOAuth := make([]oauthregistry.Record, 0, len(res.Removed))
+	removedIdentities := make([]oauthregistry.Identity, 0, len(res.Removed))
 	for _, removed := range res.Removed {
-		if removed.Auth != AuthOAuth {
-			continue
-		}
 		scope := oauthregistry.ScopeGlobal
 		if opts.Project {
 			scope = oauthregistry.ScopeProject
 		}
-		removedOAuth = append(removedOAuth, oauthregistry.Record{Scope: scope, ClientID: removed.Client.ID, ConfigPath: registryIdentityPath(removed.Path), ServerName: name, ServerURL: removed.OAuthServerURL})
+		removedIdentities = append(removedIdentities, oauthregistry.Identity{Scope: scope, ClientID: removed.Client.ID, ConfigPath: registryIdentityPath(removed.Path), ServerName: name})
 	}
-	if err := removeOAuthRegistry(opts.Env, removedOAuth); err != nil {
+	if err := removeOAuthRegistryIdentities(opts.Env, removedIdentities); err != nil {
 		return res, fmt.Errorf("config entry removed but OAuth registry cleanup failed: %w", err)
 	}
 	if len(res.Unreadable) > 0 {
@@ -786,6 +782,11 @@ func InstallRemote(opts Options) (Result, error) {
 			return res, fmt.Errorf("harness config was written but OAuth installation metadata could not be persisted: %w", registryErr)
 		}
 	}
+	if !opts.OAuth && !opts.DryRun {
+		if registryErr := removeSupersededOAuthRecords(opts.Env, opts.Project, name, res.WrittenInfo); registryErr != nil {
+			return res, fmt.Errorf("harness config was written but superseded OAuth installation metadata could not be removed: %w", registryErr)
+		}
+	}
 	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == capabilitySkipCount && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
 		for _, target := range targets {
@@ -862,7 +863,12 @@ func InstallStdio(opts Options) (Result, error) {
 			continue
 		}
 		res.Written = append(res.Written, writePath)
-		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientName: target.Client.Name, Path: writePath})
+		res.WrittenInfo = append(res.WrittenInfo, WriteInfo{ClientID: target.Client.ID, ClientName: target.Client.Name, Path: writePath})
+	}
+	if !opts.DryRun {
+		if registryErr := removeSupersededOAuthRecords(opts.Env, opts.Project, name, res.WrittenInfo); registryErr != nil {
+			return res, fmt.Errorf("harness config was written but superseded OAuth installation metadata could not be removed: %w", registryErr)
+		}
 	}
 	if interactive && !opts.Project && len(res.Written) > 0 && len(res.Failures) == 0 && !opts.DryRun {
 		ids := make([]string, 0, len(targets))
@@ -877,6 +883,26 @@ func InstallStdio(opts Options) (Result, error) {
 		return res, fmt.Errorf("%w: %s", ErrPartialFailure, strings.Join(res.Failures, "; "))
 	}
 	return res, nil
+}
+
+func removeSupersededOAuthRecords(env harness.Env, project bool, name string, written []WriteInfo) error {
+	if len(written) == 0 {
+		return nil
+	}
+	scope := oauthregistry.ScopeGlobal
+	if project {
+		scope = oauthregistry.ScopeProject
+	}
+	identities := make([]oauthregistry.Identity, 0, len(written))
+	for _, target := range written {
+		identities = append(identities, oauthregistry.Identity{
+			Scope:      scope,
+			ClientID:   target.ClientID,
+			ConfigPath: registryIdentityPath(target.Path),
+			ServerName: name,
+		})
+	}
+	return removeOAuthRegistryIdentities(env, identities)
 }
 
 func ValidateRemoteInstall(rawURL string, headers map[string]string) (string, error) {

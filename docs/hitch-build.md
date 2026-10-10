@@ -412,7 +412,9 @@ unreadable metadata is reported and never overwritten.
 `scan` labels an entry `OAuth (token held by harness)` only when that metadata still matches the
 actual scope, client, path, name, and sanitized configured URL, and the entry does not contain an
 Authorization header. `uninstall` removes matching metadata only after removing the config entry.
-The harness token is separate and is not removed by hitch's config edit.
+A successful bearer, custom-header, no-credential, or stdio overwrite clears metadata for that exact
+scope/client/path/name so a superseded record cannot later relabel a non-OAuth entry. The harness
+token is separate and is not removed by hitch's config edit.
 
 Official lifecycle/setup evidence used by the implementation:
 

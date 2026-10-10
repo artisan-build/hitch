@@ -101,3 +101,21 @@ func TestSanitizeURLDropsAllPotentialTokenMaterial(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoveIdentitiesIgnoresURLButPreservesOtherScopes(t *testing.T) {
+	home := t.TempDir()
+	env := harness.Env{Home: home}
+	global := Record{Scope: ScopeGlobal, ClientID: "cursor", ConfigPath: filepath.Join(home, "mcp.json"), ServerName: "example", ServerURL: "https://old.example.test/mcp"}
+	project := global
+	project.Scope = ScopeProject
+	if err := Upsert(env, []Record{global, project}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveIdentities(env, []Identity{{Scope: ScopeGlobal, ClientID: global.ClientID, ConfigPath: global.ConfigPath, ServerName: global.ServerName}}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := Load(env)
+	if err != nil || len(records) != 1 || records[0] != project {
+		t.Fatalf("records = %#v, %v; want project record only", records, err)
+	}
+}

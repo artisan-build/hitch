@@ -56,6 +56,22 @@ func TestOAuthInstallRegistryDrivesOnlyExactSafeScanClassification(t *testing.T)
 	if err != nil || results[0].Auth != AuthCredential || !results[0].HoldsCredential {
 		t.Fatalf("bearer scan = %#v, %v", results, err)
 	}
+
+	writeFile(t, path, `{"mcpServers":{"renamed":{"url":"https://example.test/mcp","headers":{"Authorization":""}}}}`, 0o600)
+	results, err = Scan(opts.Env, "renamed", []string{"cursor"})
+	if err != nil || results[0].Auth == AuthOAuth {
+		t.Fatalf("empty Authorization scan = %#v, %v", results, err)
+	}
+}
+
+func TestUnregisteredEmptyHeaderEntryIsNotOAuth(t *testing.T) {
+	home := t.TempDir()
+	path := expectedPath(home, "cursor")
+	writeFile(t, path, `{"mcpServers":{"renamed":{"url":"https://example.test/mcp","headers":{}}}}`, 0o600)
+	results, err := Scan(testEnv(home), "renamed", []string{"cursor"})
+	if err != nil || len(results) != 1 || results[0].Auth != AuthNoCredential || results[0].HoldsCredential {
+		t.Fatalf("unregistered scan = %#v, %v", results, err)
+	}
 }
 
 func TestOAuthRegistryRecordsOnlySuccessfulWritesAndNeverDryRun(t *testing.T) {
@@ -117,9 +133,9 @@ func TestOAuthUninstallRemovesMatchingMetadataAndSurfacesCleanupFailure(t *testi
 	if _, err := InstallRemote(opts); err != nil {
 		t.Fatal(err)
 	}
-	oldRemove := removeOAuthRegistry
-	removeOAuthRegistry = func(_ harness.Env, _ []oauthregistry.Record) error { return errors.New("CLEANUP_SENTINEL") }
-	t.Cleanup(func() { removeOAuthRegistry = oldRemove })
+	oldRemove := removeOAuthRegistryIdentities
+	removeOAuthRegistryIdentities = func(_ harness.Env, _ []oauthregistry.Identity) error { return errors.New("CLEANUP_SENTINEL") }
+	t.Cleanup(func() { removeOAuthRegistryIdentities = oldRemove })
 	result, err = Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: opts.Env})
 	if err == nil || !strings.Contains(err.Error(), "CLEANUP_SENTINEL") || len(result.Removed) != 1 {
 		t.Fatalf("cleanup failure Uninstall = %#v, %v", result, err)
@@ -193,5 +209,80 @@ func TestOAuthUninstallDoesNotDropMetadataForKeptUnreadableOrAbsentTargets(t *te
 				t.Fatalf("metadata changed for %s target: %#v, %v", tt.name, records, err)
 			}
 		})
+	}
+}
+
+func TestNonOAuthWritesRemoveSupersededOAuthIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		overwrite func(Options) (Result, error)
+	}{
+		{name: "remote without credential", overwrite: func(opts Options) (Result, error) {
+			opts.OAuth = false
+			opts.Headers = map[string]string{}
+			return InstallRemote(opts)
+		}},
+		{name: "stdio", overwrite: func(opts Options) (Result, error) {
+			opts.OAuth = false
+			opts.URL = ""
+			opts.Command = "example-command"
+			return InstallStdio(opts)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			opts := oauthOptions(home, "cursor")
+			if _, err := InstallRemote(opts); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tt.overwrite(opts); err != nil {
+				t.Fatal(err)
+			}
+			records, err := oauthregistry.Load(opts.Env)
+			if err != nil || len(records) != 0 {
+				t.Fatalf("superseded registry = %#v, %v", records, err)
+			}
+			results, err := Scan(opts.Env, "renamed", []string{"cursor"})
+			if err != nil || len(results) != 1 || results[0].Auth == AuthOAuth {
+				t.Fatalf("overwritten scan = %#v, %v", results, err)
+			}
+		})
+	}
+}
+
+func TestNonOAuthOverwriteSurfacesRegistryCleanupFailure(t *testing.T) {
+	home := t.TempDir()
+	opts := oauthOptions(home, "cursor")
+	if _, err := InstallRemote(opts); err != nil {
+		t.Fatal(err)
+	}
+	oldRemove := removeOAuthRegistryIdentities
+	removeOAuthRegistryIdentities = func(_ harness.Env, _ []oauthregistry.Identity) error {
+		return errors.New("SUPERSEDED_CLEANUP_SENTINEL")
+	}
+	t.Cleanup(func() { removeOAuthRegistryIdentities = oldRemove })
+	opts.OAuth = false
+	opts.Headers = map[string]string{}
+	result, err := InstallRemote(opts)
+	if err == nil || !strings.Contains(err.Error(), "SUPERSEDED_CLEANUP_SENTINEL") || len(result.Written) != 1 {
+		t.Fatalf("InstallRemote = %#v, %v", result, err)
+	}
+}
+
+func TestUninstallRemovesStaleOAuthIdentityAfterBearerReplacement(t *testing.T) {
+	home := t.TempDir()
+	opts := oauthOptions(home, "cursor")
+	if _, err := InstallRemote(opts); err != nil {
+		t.Fatal(err)
+	}
+	path := expectedPath(home, "cursor")
+	writeFile(t, path, `{"mcpServers":{"renamed":{"url":"https://mcp.example.test/mcp","headers":{"Authorization":"Bearer SECRET_SENTINEL"}}}}`, 0o600)
+	result, err := Uninstall(UninstallOptions{Name: "renamed", Clients: []string{"cursor"}, Yes: true, NonTTY: true, Env: opts.Env})
+	if err != nil || len(result.Removed) != 1 || result.Removed[0].Auth != AuthCredential {
+		t.Fatalf("Uninstall = %#v, %v", result, err)
+	}
+	records, err := oauthregistry.Load(opts.Env)
+	if err != nil || len(records) != 0 {
+		t.Fatalf("stale registry after bearer uninstall = %#v, %v", records, err)
 	}
 }

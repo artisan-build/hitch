@@ -31,6 +31,13 @@ type Record struct {
 	ServerURL  string `json:"server_url"`
 }
 
+type Identity struct {
+	Scope      Scope
+	ClientID   string
+	ConfigPath string
+	ServerName string
+}
+
 type file struct {
 	Version       int      `json:"version"`
 	Installations []Record `json:"installations"`
@@ -140,21 +147,28 @@ func Upsert(env harness.Env, records []Record) error {
 	return save(env, updated)
 }
 
-func Remove(env harness.Env, records []Record) error {
-	if len(records) == 0 {
+// RemoveIdentities removes records regardless of their recorded URL. It is
+// used after hitch successfully replaces an OAuth entry with a non-OAuth
+// entry, where retaining the old identity could later misclassify a manually
+// recreated URL-only entry as OAuth.
+func RemoveIdentities(env harness.Env, identities []Identity) error {
+	if len(identities) == 0 {
 		return nil
 	}
 	existing, err := Load(env)
 	if err != nil {
 		return err
 	}
-	remove := make(map[Record]bool, len(records))
-	for _, record := range records {
-		remove[record] = true
+	remove := make(map[string]bool, len(identities))
+	for _, identity := range identities {
+		if err := validateIdentity(identity); err != nil {
+			return err
+		}
+		remove[identityKey(identity)] = true
 	}
 	kept := make([]Record, 0, len(existing))
 	for _, record := range existing {
-		if !remove[record] {
+		if !remove[identityKey(record)] {
 			kept = append(kept, record)
 		}
 	}
@@ -174,14 +188,8 @@ func Matches(records []Record, candidate Record) bool {
 }
 
 func validateRecord(record Record) error {
-	if record.Scope != ScopeGlobal && record.Scope != ScopeProject {
-		return fmt.Errorf("invalid OAuth installation scope")
-	}
-	if strings.TrimSpace(record.ClientID) == "" || strings.TrimSpace(record.ServerName) == "" {
-		return fmt.Errorf("OAuth installation identity is incomplete")
-	}
-	if record.ConfigPath == "" || !filepath.IsAbs(record.ConfigPath) {
-		return fmt.Errorf("OAuth installation config path is not absolute")
+	if err := validateIdentity(identityFromRecord(record)); err != nil {
+		return err
 	}
 	sanitized, err := SanitizeURL(record.ServerURL)
 	if err != nil || sanitized != record.ServerURL {
@@ -190,8 +198,36 @@ func validateRecord(record Record) error {
 	return nil
 }
 
-func identityKey(record Record) string {
-	return strings.Join([]string{string(record.Scope), record.ClientID, record.ConfigPath, record.ServerName}, "\x00")
+func validateIdentity(identity Identity) error {
+	if identity.Scope != ScopeGlobal && identity.Scope != ScopeProject {
+		return fmt.Errorf("invalid OAuth installation scope")
+	}
+	if strings.TrimSpace(identity.ClientID) == "" || strings.TrimSpace(identity.ServerName) == "" {
+		return fmt.Errorf("OAuth installation identity is incomplete")
+	}
+	if identity.ConfigPath == "" || !filepath.IsAbs(identity.ConfigPath) {
+		return fmt.Errorf("OAuth installation config path is not absolute")
+	}
+	return nil
+}
+
+func identityFromRecord(record Record) Identity {
+	return Identity{Scope: record.Scope, ClientID: record.ClientID, ConfigPath: record.ConfigPath, ServerName: record.ServerName}
+}
+
+type installationIdentity interface {
+	Record | Identity
+}
+
+func identityKey[T installationIdentity](value T) string {
+	var identity Identity
+	switch typed := any(value).(type) {
+	case Record:
+		identity = identityFromRecord(typed)
+	case Identity:
+		identity = typed
+	}
+	return strings.Join([]string{string(identity.Scope), identity.ClientID, identity.ConfigPath, identity.ServerName}, "\x00")
 }
 
 func sortRecords(records []Record) {

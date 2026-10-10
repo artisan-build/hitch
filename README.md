@@ -95,7 +95,7 @@ hitch install https://example.com/mcp --token-stdin -c claude-code
 For a server that advertises MCP OAuth, use the same URL with no token:
 
 ```sh
-npx hitch-mcp https://example.com/mcp --name example
+npx hitch-mcp https://clankoverflow.com/mcp --name clank-overflow
 ```
 
 hitch probes conservatively for a `401` protected-resource metadata challenge. A bare `401`, timeout,
@@ -179,7 +179,8 @@ OAuth prompt output never requests a bearer token.
 hitch stores a versioned registry at `$XDG_CONFIG_HOME/hitch/oauth-installations.json` (falling back
 to `~/.config/hitch`). It is written atomically at `0600` and contains only scope, client ID, config
 path, server name, and a sanitized URL. URL userinfo, query strings, fragments, headers, credentials,
-and tokens are never stored there. A malformed or unreadable registry is reported and never replaced.
+and tokens are never stored there. A later non-OAuth write to the same entry clears its OAuth metadata.
+A malformed or unreadable registry is reported and never replaced.
 
 ## Install into a project instead of your home directory
 
