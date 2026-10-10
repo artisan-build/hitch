@@ -217,6 +217,16 @@ func TestNonOAuthWritesRemoveSupersededOAuthIdentity(t *testing.T) {
 		name      string
 		overwrite func(Options) (Result, error)
 	}{
+		{name: "remote bearer", overwrite: func(opts Options) (Result, error) {
+			opts.OAuth = false
+			opts.Headers = map[string]string{"Authorization": "Bearer REPLACEMENT_SENTINEL"}
+			return InstallRemote(opts)
+		}},
+		{name: "remote custom header", overwrite: func(opts Options) (Result, error) {
+			opts.OAuth = false
+			opts.Headers = map[string]string{"X-Api-Key": "REPLACEMENT_SENTINEL"}
+			return InstallRemote(opts)
+		}},
 		{name: "remote without credential", overwrite: func(opts Options) (Result, error) {
 			opts.OAuth = false
 			opts.Headers = map[string]string{}
@@ -247,6 +257,31 @@ func TestNonOAuthWritesRemoveSupersededOAuthIdentity(t *testing.T) {
 				t.Fatalf("overwritten scan = %#v, %v", results, err)
 			}
 		})
+	}
+}
+
+func TestNonOAuthOverwritePreservesMalformedRegistryAndReportsPostWriteFailure(t *testing.T) {
+	home := t.TempDir()
+	opts := oauthOptions(home, "cursor")
+	registryPath, err := oauthregistry.Path(opts.Env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformed := `{"version":1,"installations":[`
+	writeFile(t, registryPath, malformed, 0o600)
+
+	opts.OAuth = false
+	opts.Headers = map[string]string{"Authorization": "Bearer REPLACEMENT_SENTINEL"}
+	result, err := InstallRemote(opts)
+	if err == nil || len(result.Written) != 1 || !strings.Contains(err.Error(), "harness config was written but superseded OAuth installation metadata could not be removed") || !strings.Contains(err.Error(), registryPath) {
+		t.Fatalf("InstallRemote = %#v, %v", result, err)
+	}
+	if raw, readErr := os.ReadFile(registryPath); readErr != nil || string(raw) != malformed {
+		t.Fatalf("malformed registry changed: %q, %v", raw, readErr)
+	}
+	configRaw, readErr := os.ReadFile(expectedPath(home, "cursor"))
+	if readErr != nil || !strings.Contains(string(configRaw), "REPLACEMENT_SENTINEL") {
+		t.Fatalf("config write did not complete before cleanup failure: %q, %v", configRaw, readErr)
 	}
 }
 

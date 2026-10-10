@@ -143,6 +143,7 @@ type Options struct {
 type Result struct {
 	Name        string
 	URL         string
+	OAuth       bool
 	Written     []string
 	WrittenInfo []WriteInfo
 	WouldWrite  []string
@@ -697,7 +698,7 @@ func InstallRemote(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	res := Result{Name: name, URL: opts.URL, CodexEnvVar: CodexTokenEnvVar(name)}
+	res := Result{Name: name, URL: opts.URL, OAuth: opts.OAuth, CodexEnvVar: CodexTokenEnvVar(name)}
 	for _, client := range skipped {
 		res.Failures = append(res.Failures, oauthSkipMessage(client))
 	}
@@ -754,7 +755,14 @@ func InstallRemote(opts Options) (Result, error) {
 			}
 			res.WouldWrite = append(res.WouldWrite, writePath)
 			if opts.Stdout != nil {
-				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, writePath, MaskedJSON(entry))
+				preview := entry
+				if opts.OAuth {
+					preview, err = sanitizedOAuthPreview(entry, target.Client.ID)
+					if err != nil {
+						return res, err
+					}
+				}
+				_, _ = fmt.Fprintf(opts.Stdout, "Would write %s to %s:\n%s\n", target.Client.Name, writePath, MaskedJSON(preview))
 			}
 			continue
 		}
@@ -930,6 +938,30 @@ func SanitizeOAuthURL(rawURL string) (string, error) {
 		return "", err
 	}
 	return oauthregistry.SanitizeURL(normalized)
+}
+
+// ValidateOAuthPromptURL applies the credential-bearing transport policy and
+// rejects URL components that cannot safely be repeated in copyable OAuth
+// setup instructions. The returned URL is operationally unchanged.
+func ValidateOAuthPromptURL(rawURL string) (string, error) {
+	normalized, err := ValidateRemoteInstall(rawURL, map[string]string{"Authorization": "OAuth credential"})
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return "", fmt.Errorf("OAuth setup URL is invalid")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("OAuth manual setup cannot print a URL containing userinfo; use an endpoint URL without embedded credentials")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", fmt.Errorf("OAuth manual setup cannot safely print a URL containing a query; use an endpoint URL without query parameters")
+	}
+	if parsed.Fragment != "" || parsed.RawFragment != "" {
+		return "", fmt.Errorf("OAuth manual setup cannot safely print a URL containing a fragment; use an endpoint URL without a fragment")
+	}
+	return normalized, nil
 }
 
 func OAuthOrigin(rawURL string) (string, error) {
@@ -2468,6 +2500,28 @@ func MaskedJSON(entry map[string]any) string {
 		return "{}"
 	}
 	return string(out)
+}
+
+func sanitizedOAuthPreview(entry map[string]any, clientID string) (map[string]any, error) {
+	preview := make(map[string]any, len(entry))
+	for key, value := range entry {
+		preview[key] = value
+	}
+	key := "url"
+	switch clientID {
+	case "windsurf":
+		key = "serverUrl"
+	case "gemini-cli":
+		key = "httpUrl"
+	}
+	if operational, ok := preview[key].(string); ok {
+		sanitized, err := SanitizeOAuthURL(operational)
+		if err != nil {
+			return nil, err
+		}
+		preview[key] = sanitized
+	}
+	return preview, nil
 }
 
 func maskValue(v any) any {

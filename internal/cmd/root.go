@@ -26,6 +26,7 @@ var (
 
 	detectOAuth         = oauth.Detect
 	resolveInstallToken = resolveToken
+	uninstallServer     = install.Uninstall
 )
 
 func NewRootCommand(envFn func() (harness.Env, error)) *cobra.Command {
@@ -744,6 +745,14 @@ func targetsBySelectedIDs(targets []install.Target, selected []string) []install
 }
 
 func printInstallSummary(out io.Writer, result install.Result, dryRun bool) error {
+	displayURL := result.URL
+	if result.OAuth {
+		var err error
+		displayURL, err = install.SanitizeOAuthURL(result.URL)
+		if err != nil {
+			return err
+		}
+	}
 	if dryRun {
 		for _, path := range result.WouldWrite {
 			if _, err := fmt.Fprintf(out, "Dry run: would update %s\n", path); err != nil {
@@ -752,13 +761,13 @@ func printInstallSummary(out io.Writer, result install.Result, dryRun bool) erro
 		}
 	} else {
 		for _, written := range result.WrittenInfo {
-			if _, err := fmt.Fprintf(out, "Configured %s %q → %s (%s)\n", written.ClientName, result.Name, result.URL, written.Path); err != nil {
+			if _, err := fmt.Fprintf(out, "Configured %s %q → %s (%s)\n", written.ClientName, result.Name, displayURL, written.Path); err != nil {
 				return err
 			}
 		}
 		if len(result.WrittenInfo) == 0 {
 			for _, path := range result.Written {
-				if _, err := fmt.Fprintf(out, "Configured %q → %s (%s)\n", result.Name, result.URL, path); err != nil {
+				if _, err := fmt.Fprintf(out, "Configured %q → %s (%s)\n", result.Name, displayURL, path); err != nil {
 					return err
 				}
 			}
@@ -857,7 +866,7 @@ func newUninstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 			if err != nil {
 				return exitError{err: err, code: 2}
 			}
-			result, err := install.Uninstall(install.UninstallOptions{
+			result, err := uninstallServer(install.UninstallOptions{
 				Name:    args[0],
 				Clients: canonicalClients,
 				Yes:     yes,
@@ -875,10 +884,13 @@ func newUninstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				if strings.Contains(err.Error(), "non-TTY uninstall") {
 					return exitError{err: err, code: 2}
 				}
+				if len(result.Removed) == 0 && len(result.Kept) == 0 && len(result.Unreadable) == 0 && len(result.NotPresent) == 0 {
+					return err
+				}
 				if summaryErr := printUninstallSummary(cmd.OutOrStdout(), result); summaryErr != nil {
 					return summaryErr
 				}
-				return silentExitError{err: err, code: 1}
+				return err
 			}
 			if summaryErr := printUninstallSummary(cmd.OutOrStdout(), result); summaryErr != nil {
 				return summaryErr
@@ -951,11 +963,7 @@ func newPromptCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			url, err := install.SanitizeOAuthURL(probeURL)
-			if err != nil {
-				return err
-			}
-			name, _, err := install.InferName(url)
+			name, _, err := install.InferName(probeURL)
 			if err != nil {
 				return err
 			}
@@ -964,19 +972,27 @@ func newPromptCommand() *cobra.Command {
 				oauthMode = detectOAuth(probeURL)
 			}
 			if oauthMode {
+				url, validateErr := install.ValidateOAuthPromptURL(probeURL)
+				if validateErr != nil {
+					return validateErr
+				}
 				origin, originErr := install.OAuthOrigin(url)
 				if originErr != nil {
 					return originErr
 				}
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Desktop: open Customize > Connectors, choose + Add > Add custom connector, enter %q with URL %s, then choose the documented sign-in option and connect.\nOfficial setup: %s\n\nJetBrains: current official documentation establishes remote HTTP configuration but does not establish a native OAuth login step. In Settings > Tools > AI Assistant > Model Context Protocol (MCP), add an HTTP server with URL %s. If sign-in is required, follow the server vendor's account setup at %s.\nOfficial setup and limitation source: %s\n\nCodex: run:\ncodex mcp add %s --url %s\ncodex mcp login %s\nOfficial setup: %s\n", name, url, harness.ClaudeDesktopOAuthSetupSource, url, origin, harness.JetBrainsMCPSetupSource, name, url, name, harness.CodexOAuthSetupSource)
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Desktop: open Customize > Connectors, choose + Add > Add custom connector, enter %q with URL %s, then choose the documented sign-in option and connect.\nOfficial setup: %s\n\nJetBrains: current official documentation establishes remote HTTP configuration but does not establish a native OAuth login step. In Settings > Tools > AI Assistant > Model Context Protocol (MCP), add an HTTP server with URL %s. If sign-in is required, follow the server vendor's account setup at %s.\nOfficial setup and limitation source: %s\n\nCodex: run:\ncodex mcp add %s --url %s\ncodex mcp login %s\nOfficial setup: %s\n", name, url, harness.ClaudeDesktopOAuthSetupSource, url, origin, harness.JetBrainsMCPSetupSource, name, posixSingleQuote(url), name, harness.CodexOAuthSetupSource)
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Desktop: add a stdio MCP entry that runs mcp-remote for %s; hitch does not write it because remote HTTP requires a local proxy and Node runtime.\n\nJetBrains: add this MCP server through the JetBrains MCP UI for %s; hitch does not write it because the dialog has no Authorization-headers field.\n\nCodex: hitch does not install Codex automatically yet, but hitch scan and uninstall can verify and remove this manual entry later. Add this to Codex config manually:\n[%s]\nurl = %q\nbearer_token_env_var = \"%s\"\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN\n", url, url, install.CodexServerTableHeader(name), url, install.CodexTokenEnvVar(name), install.CodexTokenEnvVar(name))
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Desktop: add a stdio MCP entry that runs mcp-remote for %s; hitch does not write it because remote HTTP requires a local proxy and Node runtime.\n\nJetBrains: add this MCP server through the JetBrains MCP UI for %s; hitch does not write it because the dialog has no Authorization-headers field.\n\nCodex: hitch does not install Codex automatically yet, but hitch scan and uninstall can verify and remove this manual entry later. Add this to Codex config manually:\n[%s]\nurl = %q\nbearer_token_env_var = \"%s\"\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN\n", probeURL, probeURL, install.CodexServerTableHeader(name), probeURL, install.CodexTokenEnvVar(name), install.CodexTokenEnvVar(name))
 			return err
 		},
 	}
 	cmd.Flags().BoolVar(&oauthOverride, "oauth", false, "print OAuth manual setup without probing")
 	return cmd
+}
+
+func posixSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func isTerminal(in io.Reader) bool {
