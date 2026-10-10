@@ -1418,6 +1418,20 @@ func TestInstallPartialFailureContinuesAndSummarizesWrittenFiles(t *testing.T) {
 	}
 }
 
+func TestInstallCommandErrorDoesNotHideNonPartialErrorAfterProgress(t *testing.T) {
+	preferenceErr := errors.New("save preferences sentinel")
+	result := installpkg.Result{
+		Written:  []string{"/cursor.json"},
+		Failures: []string{"Codex: capability skip"},
+	}
+	if got := installCommandError(result, preferenceErr); !errors.Is(got, preferenceErr) {
+		t.Fatalf("installCommandError = %v, want preference error", got)
+	}
+	if got := installCommandError(result, installpkg.ErrPartialFailure); got != nil {
+		t.Fatalf("partial harness failure after progress = %v, want nil", got)
+	}
+}
+
 func TestInstallExitCodeIsOneWhenNoHarnessConfigured(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, filepath.Join(home, ".cursor", "mcp.json"), "{not-json", 0o600)

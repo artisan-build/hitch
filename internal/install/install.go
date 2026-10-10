@@ -21,6 +21,10 @@ import (
 
 const codexTokenPrefix = "HITCH_TOKEN_"
 
+// ErrPartialFailure marks target-specific install failures. Callers may treat
+// it as partial success only when at least one target was written or validated.
+var ErrPartialFailure = errors.New("some harnesses were not configured")
+
 // ClaimPendingAuthorization stands in for the Authorization header during
 // --dry-run --claim, where no exchange happens and no token exists. It must
 // never read like a value, and masking leaves it visible so the preview says
@@ -654,7 +658,7 @@ func InstallRemote(opts Options) (Result, error) {
 		}
 	}
 	if len(res.Failures) > 0 {
-		return res, fmt.Errorf("some harnesses were not configured: %s", strings.Join(res.Failures, "; "))
+		return res, fmt.Errorf("%w: %s", ErrPartialFailure, strings.Join(res.Failures, "; "))
 	}
 	return res, nil
 }
@@ -732,7 +736,7 @@ func InstallStdio(opts Options) (Result, error) {
 		}
 	}
 	if len(res.Failures) > 0 {
-		return res, fmt.Errorf("some harnesses were not configured: %s", strings.Join(res.Failures, "; "))
+		return res, fmt.Errorf("%w: %s", ErrPartialFailure, strings.Join(res.Failures, "; "))
 	}
 	return res, nil
 }

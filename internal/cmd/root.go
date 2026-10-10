@@ -207,13 +207,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 					return summaryErr
 				}
 				if err != nil {
-					if len(result.Failures) > 0 && (len(result.Written) > 0 || len(result.WouldWrite) > 0) {
-						return nil
-					}
-					if len(result.Failures) == 0 {
-						return err
-					}
-					return silentExitError{err: err, code: 1}
+					return installCommandError(result, err)
 				}
 				return nil
 			}
@@ -365,13 +359,7 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 				return summaryErr
 			}
 			if err != nil {
-				if len(result.Failures) > 0 && (len(result.Written) > 0 || len(result.WouldWrite) > 0) {
-					return nil
-				}
-				if len(result.Failures) == 0 {
-					return err
-				}
-				return silentExitError{err: err, code: 1}
+				return installCommandError(result, err)
 			}
 			return nil
 		},
@@ -780,6 +768,17 @@ func printInstallSummary(out io.Writer, result install.Result, dryRun bool) erro
 		}
 	}
 	return nil
+}
+
+func installCommandError(result install.Result, err error) error {
+	progress := len(result.Written) > 0 || len(result.WouldWrite) > 0
+	if errors.Is(err, install.ErrPartialFailure) && progress {
+		return nil
+	}
+	if len(result.Failures) > 0 && !progress {
+		return silentExitError{err: err, code: 1}
+	}
+	return err
 }
 
 func newScanCommand(envFn func() (harness.Env, error)) *cobra.Command {

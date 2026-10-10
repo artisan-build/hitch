@@ -3,6 +3,7 @@ package install
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -860,6 +861,9 @@ func TestInteractiveSavePreferencesFailureIsReturned(t *testing.T) {
 	res, err := InstallRemote(opts)
 	if err == nil {
 		t.Fatalf("InstallRemote returned nil error, want SavePreferences failure")
+	}
+	if errors.Is(err, ErrPartialFailure) {
+		t.Fatalf("SavePreferences error was misclassified as partial harness failure: %v", err)
 	}
 	if len(res.Written) != 1 {
 		t.Fatalf("written = %#v, want cursor write before preference failure", res.Written)
