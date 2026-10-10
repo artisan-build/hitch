@@ -348,7 +348,15 @@ func newInstallCommand(envFn func() (harness.Env, error)) *cobra.Command {
 					return ok, form.Run()
 				},
 				PickTargets: func(targets []install.Target, preferred map[string]bool) ([]install.Target, error) {
-					return pickTargets(normalizedURL, targets, preferred)
+					displayURL := normalizedURL
+					if oauthMode {
+						var sanitizeErr error
+						displayURL, sanitizeErr = install.SanitizeOAuthURL(normalizedURL)
+						if sanitizeErr != nil {
+							return nil, sanitizeErr
+						}
+					}
+					return pickTargets(displayURL, targets, preferred)
 				},
 				ConfirmProjectWrite: func(path string) (bool, error) {
 					return confirmProjectCredentialWrite(path)
@@ -965,10 +973,6 @@ func newPromptCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			name, _, err := install.InferName(probeURL)
-			if err != nil {
-				return err
-			}
 			oauthMode := oauthOverride
 			if !oauthMode {
 				oauthMode = detectOAuth(probeURL)
@@ -978,11 +982,19 @@ func newPromptCommand() *cobra.Command {
 				if validateErr != nil {
 					return validateErr
 				}
+				name, _, inferErr := install.InferName(url)
+				if inferErr != nil {
+					return inferErr
+				}
 				origin, originErr := install.OAuthOrigin(url)
 				if originErr != nil {
 					return originErr
 				}
 				_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Desktop: open Customize > Connectors, choose + Add > Add custom connector, enter %q with URL %s, then choose the documented sign-in option and connect.\nOfficial setup: %s\n\nJetBrains: current official documentation establishes remote HTTP configuration but does not establish a native OAuth login step. In Settings > Tools > AI Assistant > Model Context Protocol (MCP), add an HTTP server with URL %s. If sign-in is required, follow the server vendor's account setup at %s.\nOfficial setup and limitation source: %s\n\nCodex: run:\ncodex mcp add %s --url %s\ncodex mcp login %s\nOfficial setup: %s\n", name, url, harness.ClaudeDesktopOAuthSetupSource, url, origin, harness.JetBrainsMCPSetupSource, name, posixSingleQuote(url), name, harness.CodexOAuthSetupSource)
+				return err
+			}
+			name, _, err := install.InferName(probeURL)
+			if err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Desktop: add a stdio MCP entry that runs mcp-remote for %s; hitch does not write it because remote HTTP requires a local proxy and Node runtime.\n\nJetBrains: add this MCP server through the JetBrains MCP UI for %s; hitch does not write it because the dialog has no Authorization-headers field.\n\nCodex: hitch does not install Codex automatically yet, but hitch scan and uninstall can verify and remove this manual entry later. Add this to Codex config manually:\n[%s]\nurl = %q\nbearer_token_env_var = \"%s\"\n\nBefore starting Codex, run:\nexport %s=YOUR_TOKEN\n", probeURL, probeURL, install.CodexServerTableHeader(name), probeURL, install.CodexTokenEnvVar(name), install.CodexTokenEnvVar(name))

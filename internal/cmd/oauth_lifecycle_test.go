@@ -80,7 +80,9 @@ func TestOAuthInstallPickerAndNameErrorsDoNotEchoSensitiveURLComponents(t *testi
 		if want := "https://example.test/mcp"; url != want {
 			t.Fatalf("picker URL = %q, want %q", url, want)
 		}
-		*selected = nil
+		if len(*selected) != 1 || (*selected)[0] != "cursor" {
+			t.Fatalf("picker selection = %#v, want cursor", *selected)
+		}
 		return nil
 	}
 	t.Cleanup(func() {

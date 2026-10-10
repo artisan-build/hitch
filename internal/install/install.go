@@ -611,12 +611,12 @@ func InferName(rawURL string) (string, bool, error) {
 	}
 	host = strings.Trim(strings.ToLower(host), "[] .")
 	if host == "" {
-		return "", false, fmt.Errorf("invalid URL %q: missing host", rawURL)
+		return "", false, fmt.Errorf("invalid URL: missing host")
 	}
 	host = strings.TrimPrefix(host, "mcp.")
 	label := strings.Split(host, ".")[0]
 	if label == "" {
-		return "", false, fmt.Errorf("could not infer a server name from %q", rawURL)
+		return "", false, fmt.Errorf("could not infer a server name from URL; rerun with --name")
 	}
 	return sanitizeName(label), genericNames[label], nil
 }
@@ -634,7 +634,7 @@ func ResolveName(rawURL string, explicit string, yes bool, confirm func(string) 
 		return "", err
 	}
 	if name == "" {
-		return "", fmt.Errorf("could not infer a usable server name from %q", rawURL)
+		return "", fmt.Errorf("could not infer a usable server name from URL; rerun with --name")
 	}
 	if !ambiguous {
 		return name, nil
